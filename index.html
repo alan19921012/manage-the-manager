@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Tomato Arcade - Ultimate Hub</title>
+    <!-- 引入 Press Start 2P 像素字型 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        /* 💡 載入本地 fonts 資料夾內的「縫合像素繁體-12px-比例.ttf」 */
+        @font-face {
+            font-family: 'StitchPixelFont';
+            src: url('./fonts/縫合像素繁體-12px-比例.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+        }
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+        #gameContainer {
+            position: relative;
+            width: 96vw;
+            height: 72vw;
+            max-width: 800px;
+            max-height: 600px;
+            background-color: #000;
+            box-shadow: 0 0 30px #000;
+            overflow: hidden;
+            touch-action: none;
+        }
+        #gameCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+</div>
+
+<!-- 💡 先加上 muted 繞過瀏覽器的硬性攔截，確保進入頁面立刻運轉 -->
+<audio id="bgm" loop autoplay muted preload="auto" playsinline webkit-playsinline>
+    <source src="bgm.mp3" type="audio/mpeg">
+    <source src="images/bgm.mp3" type="audio/mpeg">
+</audio>
+
+<script>
+(function() {
+    const canvas = document.getElementById('gameCanvas');
+    const container = document.getElementById('gameContainer');
+    const bgm = document.getElementById('bgm');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    const GAME_WIDTH = 800;
+    const GAME_HEIGHT = 600;
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const startInMenu = urlParams.get('mode') === 'menu';
+
+    let currentMode = startInMenu ? 'MENU' : 'COVER';
+    let selectedStageIndex = 0;
+    let activeGameFrame = null;
+    let waveTimer = 0;
+    let menuAnimTimer = 0;
+
+    let transitionTimer = 0;
+    const TRANSITION_DURATION = 0.95; 
+    let pendingStageFile = '';
+
+    // 💡 判定雙擊專用變數
+    let lastClickTime = 0;
+    let lastClickX = 0;
+    let lastClickY = 0;
+
+    // 💡 Threads 按鈕點擊判定區域 (封面圖畫)
+    let threadsBtnBounds = { x: 0, y: 0, w: 0, h: 0 };
+
+    function loadRobustImage(names) {
+        const img = new Image();
+        img.isReady = false;
+        const list = Array.isArray(names) ? names : [names];
+        let sources = [];
+        for (let n of list) {
+            sources.push(`images/${n}`);
+            sources.push(`./images/${n}`);
+            sources.push(n);
+        }
+        let srcIdx = 0;
+        img.onload = () => { if(img.naturalWidth > 0) img.isReady = true; };
+        img.onerror = () => {
+            srcIdx++;
+            if (srcIdx < sources.length) img.src = sources[srcIdx];
+        };
+        img.src = sources[0];
+        return img;
+    }
+
+    const stageConfigs = [
+        { name: 'GAO STAGE', file: 'gao_game.html', prefix: 'gao_stage_', count: 3 },
+        { name: 'MARF STAGE', file: 'marf_game.html', prefix: 'marf_stage_', count: 3 },
+        { name: 'DAY STAGE', file: 'day_game.html', prefix: 'day_stage_', count: 10 },
+        { name: 'SUMLING STAGE', file: 'sumling_game.html', prefix: 'sumling_stage_', count: 3 },
+        { name: 'IVY STAGE', file: 'ivy_game.html', prefix: 'ivy_stage_', count: 3 },
+        { name: 'WINKA STAGE', file: 'winka_game.html', prefix: 'winaka_stage_', count: 3 },
+        { name: 'CANDY STAGE', file: 'candy_game.html', prefix: 'candy_stage_', count: 4 }
+    ];
+
+    const stages = stageConfigs.map(config => {
+        let imgs = [];
+        for (let i = 1; i <= config.count; i++) {
+            imgs.push(loadRobustImage([`${config.prefix}${i}.jpg`, `${config.prefix}${i}.png`]));
+        }
+        return {
+            name: config.name,
+            file: config.file,
+            count: config.count,
+            images: imgs
+        };
+    });
+
+    const bgStartImg = loadRobustImage(['bg_start.jpg', 'bg_start.png']);
+    const bgStart2Img = loadRobustImage(['bg_start2.png', 'bg_start2.jpg']);
+
+    let audioCtx = null;
+
+    function initAudioContext() {
+        try {
+            if (!audioCtx) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (AudioContextClass) audioCtx = new AudioContextClass();
+            }
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            window.audioCtx = audioCtx;
+        } catch(e){}
+    }
+
+    function tryPlayBGM() {
+        if (!bgm) return;
+        bgm.volume = 0.45;
+        bgm.muted = false;
+        const promise = bgm.play();
+        if (promise !== undefined) {
+            promise.catch(() => {
+                bgm.muted = true;
+                bgm.play().catch(() => {});
+            });
+        }
+    }
+
+    tryPlayBGM();
+
+    const enableAudioOnUserInteraction = () => {
+        initAudioContext();
+        if (bgm) {
+            bgm.muted = false;
+            if (bgm.paused) bgm.play().catch(() => {});
+        }
+        if (activeGameFrame && activeGameFrame.contentWindow) {
+            try {
+                activeGameFrame.contentWindow.postMessage('UNLOCK_AUDIO', '*');
+            } catch(e){}
+        }
+    };
+
+    window.addEventListener('pointerdown', enableAudioOnUserInteraction, { passive: true });
+    window.addEventListener('touchstart', enableAudioOnUserInteraction, { passive: true });
+    window.addEventListener('keydown', enableAudioOnUserInteraction, { passive: true });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden || document.webkitHidden) {
+            if (bgm) bgm.pause();
+        } else {
+            tryPlayBGM();
+        }
+    });
+
+    // 💡 監聽來自遊戲子頁面 (iframe) 的訊息與對拍控制指令
+    window.addEventListener('message', (e) => {
+        if (!e.data) return;
+        const action = typeof e.data === 'string' ? e.data : e.data.action;
+
+        if (action === 'RELOAD_PAGE' || action === 'RETURN_TO_COVER' || action === 'GO_COVER' || action === 'COVER') {
+            window.location.href = window.location.pathname + '?mode=menu';
+        } else if (action === 'RELOAD_GAME') {
+            window.location.reload();
+        } else if (action === 'PAUSE_BGM') {
+            if (bgm) bgm.pause();
+        } else if (action === 'SYNC_BGM') {
+            if (bgm) {
+                bgm.currentTime = 0;
+                bgm.muted = false;
+                bgm.play().catch(() => {});
+            }
+        }
+    });
+
+    function playClickSound() {
+        try {
+            initAudioContext();
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(450, now);
+            osc.frequency.exponentialRampToValueAtTime(750, now + 0.08);
+            gain.gain.setValueAtTime(0.2, now);
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.08);
+            osc.start(now);
+            osc.stop(now + 0.08);
+        } catch(e){}
+    }
+
+    function playStartGameSound() {
+        try {
+            initAudioContext();
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(300, now);
+            osc.frequency.exponentialRampToValueAtTime(1200, now + 0.25);
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.25);
+            osc.start(now);
+            osc.stop(now + 0.25);
+        } catch(e){}
+    }
+
+    function drawPixelBox(x, y, w, h, bgColor, borderColor, shadowColor = '#000000', pixelSize = 4) {
+        ctx.save();
+        ctx.fillStyle = shadowColor;
+        ctx.fillRect(x + pixelSize, y + pixelSize, w, h);
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = borderColor;
+        ctx.fillRect(x, y, w, pixelSize); 
+        ctx.fillRect(x, y + h - pixelSize, w, pixelSize); 
+        ctx.fillRect(x, y, pixelSize, h); 
+        ctx.fillRect(x + w - pixelSize, y, pixelSize, h); 
+        ctx.restore();
+    }
+
+    function drawRoundedPixelBox(x, y, w, h, r, bgColor, borderColor, shadowColor = '#000000', pixelSize = 4) {
+        ctx.save();
+        ctx.fillStyle = shadowColor;
+        drawRoundedPath(x + pixelSize, y + pixelSize, w, h, r);
+        ctx.fill();
+
+        ctx.fillStyle = bgColor;
+        drawRoundedPath(x, y, w, h, r);
+        ctx.fill();
+
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = pixelSize;
+        drawRoundedPath(x, y, w, h, r);
+        ctx.stroke();
+
+        ctx.restore();
+    }
+
+    function drawRoundedPath(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5);
+        ctx.lineTo(x + w - r, y);
+        ctx.arc(x + w - r, y + r, r, Math.PI * 1.5, Math.PI * 2);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arc(x + w - r, y + h - r, r, 0, Math.PI * 0.5);
+        ctx.lineTo(x + r, y + h);
+        ctx.arc(x + r, y + h - r, r, Math.PI * 0.5, Math.PI);
+        ctx.closePath();
+    }
+
+    function drawPixelText(text, x, y, color = '#ffffff', fontSize = 16, align = 'center', useOnlyStitchFont = false) {
+        ctx.save();
+        if (useOnlyStitchFont) {
+            ctx.font = `${fontSize}px "StitchPixelFont", monospace`;
+        } else {
+            ctx.font = `${fontSize}px "Press Start 2P", "StitchPixelFont", monospace`;
+        }
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#000000';
+        ctx.fillText(text, x + 2, y + 2);
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
+    // 💡 繪製紅字白框文字（框加粗 1px）
+    function drawRedWhiteText(text, x, y, fontSize = 10, align = 'center') {
+        ctx.save();
+        ctx.font = `${fontSize}px "Press Start 2P", "StitchPixelFont", monospace`;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+
+        // 繪製白色描邊外圈（含加粗點位）
+        ctx.fillStyle = '#ffffff';
+        const offsets = [
+            [-1,-1], [0,-1], [1,-1], [-1,0], [1,0], [-1,1], [0,1], [1,1],
+            [-2,-2], [0,-2], [2,-2], [-2,0], [2,0], [-2,2], [0,2], [2,2],
+            [-1,-2], [1,-2], [-2,-1], [2,-1], [-2,1], [2,1], [-1,2], [1,2]
+        ];
+        for (let [ox, oy] of offsets) {
+            ctx.fillText(text, x + ox, y + oy);
+        }
+
+        // 繪製紅色文字本體
+        ctx.fillStyle = '#C1001B';
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
+    function drawClassicPixelTomato(x, y, targetSize = 40) {
+        ctx.save();
+        ctx.translate(Math.round(x), Math.round(y));
+        const scale = (targetSize / 42) * 0.9;
+        ctx.scale(scale, scale);
+        ctx.imageSmoothingEnabled = false;
+
+        ctx.fillStyle = '#1b5e20';
+        ctx.fillRect(-6, -22, 12, 6);
+        ctx.fillRect(-3, -25, 6, 4);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = '#d50000';
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        ctx.fillStyle = '#ff8a80';
+        ctx.fillRect(-12, -12, 8, 8);
+
+        ctx.restore();
+    }
+
+    function drawPixelArrowIcon(centerX, centerY, size = 78, direction = 'right') {
+        ctx.save();
+        ctx.translate(Math.round(centerX), Math.round(centerY));
+        if (direction === 'left') ctx.scale(-1, 1);
+
+        const unit = Math.round(size / 12);
+        const grid = [
+            [0,0,1,1,0,0,0,0,0,0,0,0],
+            [0,1,2,3,1,1,0,0,0,0,0,0],
+            [1,2,2,3,3,3,1,1,0,0,0,0],
+            [1,2,2,3,3,3,3,3,1,1,0,0],
+            [1,2,2,3,3,3,3,3,3,3,1,0],
+            [1,2,2,3,3,3,3,3,3,3,3,1],
+            [1,2,2,3,3,3,3,3,3,3,3,1],
+            [1,2,2,3,3,3,3,3,3,3,1,0],
+            [1,2,2,3,3,3,3,3,1,1,0,0],
+            [1,2,2,4,4,4,1,1,0,0,0,0],
+            [0,1,4,4,1,1,0,0,0,0,0,0],
+            [0,0,1,1,0,0,0,0,0,0,0,0]
+        ];
+        const colorMap = { 1: '#1a0c00', 2: '#fff59d', 3: '#ff9800', 4: '#e65100' };
+        const offsetX = -(12 * unit) / 2;
+        const offsetY = -(12 * unit) / 2;
+
+        for (let r = 0; r < 12; r++) {
+            for (let c = 0; c < 12; c++) {
+                const val = grid[r][c];
+                if (val !== 0) {
+                    ctx.fillStyle = colorMap[val];
+                    ctx.fillRect(offsetX + c * unit, offsetY + r * unit, unit, unit);
+                }
+            }
+        }
+        ctx.restore();
+    }
+
+    // 💡 繪製 5 個五角排列文字（字體 10px，直徑 267px，中心點 (590, 350)，包含各別微調）
+    function drawPentagonLabels(cx, cy, diameter = 267) {
+        ctx.save();
+        
+        const radius = diameter / 2; // 半徑 133.5px
+        const labels = ["INTELLIGENT", "RELAX", "CONTROL", "STEALTH", "STRENGTH"];
+        
+        // 微調偏移量 [xOffset, yOffset]
+        const customOffsets = [
+            [0, 4],    // INTELLIGENT (下移 4px)
+            [0, 8],    // RELAX (下移 8px)
+            [0, 1],    // CONTROL (下移 1px)
+            [10, 3],   // STEALTH (右移 10px, 下移 3px)
+            [0, 8]     // STRENGTH (下移 8px)
+        ];
+
+        for (let i = 0; i < 5; i++) {
+            const angle = (-90 + i * 72) * (Math.PI / 180);
+            const [offX, offY] = customOffsets[i];
+            
+            const lx = cx + radius * Math.cos(angle) + offX;
+            const ly = cy + radius * Math.sin(angle) + offY;
+            
+            drawRedWhiteText(labels[i], lx, ly, 10, 'center');
+        }
+
+        ctx.restore();
+    }
+
+    function renderCover() {
+        ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        if (bgStartImg.isReady && bgStartImg.naturalWidth > 0) {
+            ctx.drawImage(bgStartImg, 0, 0, GAME_WIDTH, GAME_HEIGHT);
+        } else {
+            ctx.fillStyle = '#1e1b4b';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+        }
+
+        if (bgStart2Img.isReady && bgStart2Img.naturalWidth > 0) {
+            const titleW = 450 * 1.07;
+            const titleH = titleW * (599 / 866);
+            const waveY = 120 + Math.sin(waveTimer * 3) * 12;
+            const waveX = (GAME_WIDTH - titleW) / 2;
+            ctx.drawImage(bgStart2Img, waveX, waveY, titleW, titleH);
+        } else {
+            drawPixelText("TOMATO ARCADE", GAME_WIDTH / 2, 160, '#ffeb3b', 28, 'center');
+        }
+
+        const btnW = 420;
+        const btnH = 54;
+        const btnX = (GAME_WIDTH - btnW) / 2;
+        const btnY = 460;
+
+        drawPixelBox(btnX, btnY, btnW, btnH, '#C1001B', '#ffffff', '#000000', 5);
+
+        const flashAlpha = 0.5 + Math.abs(Math.sin(waveTimer * 4)) * 0.5;
+        ctx.save();
+        ctx.globalAlpha = flashAlpha;
+        drawPixelText("DOUBLE CLICK TO START", GAME_WIDTH / 2, btnY + btnH / 2, '#ffea00', 15, 'center');
+        ctx.restore();
+
+        const credW = GAME_WIDTH;
+        const credH = 56;
+        const credX = 0;
+        const credY = GAME_HEIGHT - credH;
+
+        ctx.fillStyle = '#C1001B';
+        ctx.fillRect(credX, credY, credW, credH);
+
+        drawPixelText("FAN-MADE GAME BY ALAN @kizoku_koshi_cosplay", GAME_WIDTH / 2 - 25, credY + 18, '#ffea00', 12, 'center');
+        
+        const line2 = "INSPIRED BY COLLAR | ALL VISUALS & MUSIC BELONG TO MAKERVILLE";
+        drawPixelText(line2, GAME_WIDTH / 2, credY + 38, '#ffffff', 11, 'center');
+    }
+
+    const headerW = 280 * 1.2; 
+    const headerH = 40 * 1.2;  
+    const headerX = (GAME_WIDTH - headerW) / 2;
+    const headerY = 10;
+    const headerFontSize = Math.round(16 * 1.2); 
+
+    const basePlayTextWidth = 19 * 4; 
+    const playBtnW = Math.round((basePlayTextWidth + 80 + 80) * 1.2); 
+    const playBtnH = Math.round(50 * 1.2); 
+    const basePlayBtnX = (GAME_WIDTH - playBtnW) / 2;
+    const playBtnX = basePlayBtnX + 170 + 40 - 15 - 5; 
+    const playBtnY = 530 - 15; 
+    const playFontSize = Math.round(18 * 1.2); 
+
+    const arrowIconSize = Math.round(68 * 1.15); 
+    const prevBtnArea = { x: 15, y: 485, w: 75, h: 75 };
+    const nextBtnArea = { x: 315, y: 485, w: 75, h: 75 }; 
+    const playBtnArea = { x: playBtnX, y: playBtnY, w: playBtnW, h: playBtnH };
+
+    function renderMenu() {
+        ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        const currentStage = stages[selectedStageIndex];
+        const frameInterval = 1.5 / currentStage.count; 
+        const currentFrameIdx = Math.floor(menuAnimTimer / frameInterval) % currentStage.count;
+        const currentImg = currentStage.images[currentFrameIdx];
+
+        if (currentImg && currentImg.isReady && currentImg.naturalWidth > 0) {
+            ctx.save();
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(currentImg, 0, 0, GAME_WIDTH, GAME_HEIGHT);
+            ctx.restore();
+        } else {
+            ctx.fillStyle = '#0a0a0c';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+        }
+
+        // 💡 繪製 5 個五角形排布文字（中心點 590, 350，直徑 267px）
+        drawPentagonLabels(590, 350, 267);
+
+        drawRoundedPixelBox(headerX, headerY, headerW, headerH, 14, '#ffffff', '#C1001B', '#000000', 5);
+        
+        const isTextVisible = Math.floor(menuAnimTimer) % 2 === 0;
+        if (isTextVisible) {
+            drawPixelText("SELECT STAGE", GAME_WIDTH / 2, headerY + headerH / 2, '#C1001B', headerFontSize, 'center');
+        }
+
+        drawClassicPixelTomato(headerX, headerY + headerH / 2, 50);
+        drawClassicPixelTomato(headerX + headerW, headerY + headerH / 2, 50);
+
+        drawPixelArrowIcon(prevBtnArea.x + prevBtnArea.w / 2, prevBtnArea.y + prevBtnArea.h / 2, arrowIconSize, 'left');
+        drawPixelArrowIcon(nextBtnArea.x + nextBtnArea.w / 2, nextBtnArea.y + nextBtnArea.h / 2, arrowIconSize, 'right');
+
+        const flashAlpha = 0.8 + Math.sin(menuAnimTimer * 6) * 0.2;
+        drawPixelBox(playBtnArea.x, playBtnArea.y, playBtnArea.w, playBtnArea.h, '#C1001B', '#ffea00', '#000000', 5);
+        
+        drawClassicPixelTomato(playBtnArea.x + 38, playBtnArea.y + playBtnArea.h / 2, 40);
+
+        ctx.save();
+        ctx.globalAlpha = flashAlpha;
+        drawPixelText("PLAY", playBtnArea.x + playBtnArea.w / 2, playBtnArea.y + playBtnArea.h / 2, '#ffffff', playFontSize, 'center');
+        ctx.restore();
+
+        drawClassicPixelTomato(playBtnArea.x + playBtnArea.w - 38, playBtnArea.y + playBtnArea.h / 2, 40);
+    }
+
+    function renderTransition() {
+        renderMenu();
+
+        const progress = Math.min(transitionTimer / TRANSITION_DURATION, 1);
+        const tomatoSize = 108; 
+        const stripeHeight = tomatoSize * 0.88; 
+        const baseProgressX = -250 + progress * (GAME_WIDTH + 500);
+
+        ctx.save();
+        const countY = Math.ceil(GAME_HEIGHT / stripeHeight) + 1;
+
+        for (let i = 0; i < countY; i++) {
+            const startY = i * stripeHeight;
+            const speedOffset = Math.sin(i * 1.1 + progress * Math.PI * 1.2) * 110;
+            const currentTomatoX = baseProgressX + speedOffset;
+            const ribbonWidth = Math.max(0, currentTomatoX);
+
+            if (ribbonWidth > 0) {
+                ctx.fillStyle = (i % 2 === 0) ? '#C1001B' : '#FFFFFF';
+                ctx.fillRect(0, startY, ribbonWidth, stripeHeight);
+
+                ctx.save();
+                ctx.globalAlpha = 0.16;
+                const moireGridSize = 6;
+                for (let mx = 0; mx < ribbonWidth; mx += moireGridSize) {
+                    ctx.fillStyle = (Math.floor(mx / moireGridSize) % 2 === 0) ? '#000000' : '#ffffff';
+                    ctx.fillRect(mx, startY, 3, stripeHeight);
+                }
+                ctx.restore();
+            }
+        }
+
+        for (let i = 0; i < countY; i++) {
+            const tomatoY = i * stripeHeight + (stripeHeight / 2);
+            const speedOffset = Math.sin(i * 1.1 + progress * Math.PI * 1.2) * 110;
+            const currentTomatoX = baseProgressX + speedOffset;
+
+            drawClassicPixelTomato(currentTomatoX, tomatoY, tomatoSize);
+        }
+
+        ctx.restore();
+
+        if (progress >= 1 && pendingStageFile) {
+            launchStage(pendingStageFile);
+            pendingStageFile = '';
+        }
+    }
+
+    let lastTime = Date.now();
+    function mainLoop() {
+        const now = Date.now();
+        const delta = (now - lastTime) / 1000;
+        lastTime = now;
+
+        waveTimer += delta;
+        menuAnimTimer += delta;
+
+        if (currentMode === 'COVER') {
+            renderCover();
+        } else if (currentMode === 'MENU') {
+            renderMenu();
+        } else if (currentMode === 'TRANSITION') {
+            transitionTimer += delta;
+            renderTransition();
+        }
+
+        requestAnimationFrame(mainLoop);
+    }
+    requestAnimationFrame(mainLoop);
+
+    function startStageTransition(filename) {
+        if (currentMode === 'TRANSITION' || currentMode === 'PLAYING') return;
+        playStartGameSound();
+        currentMode = 'TRANSITION';
+        transitionTimer = 0;
+        pendingStageFile = filename;
+    }
+
+    function launchStage(filename) {
+        currentMode = 'PLAYING';
+        enableAudioOnUserInteraction(); 
+
+        if (activeGameFrame) {
+            activeGameFrame.remove();
+            activeGameFrame = null;
+        }
+
+        const iframe = document.createElement('iframe');
+        iframe.src = filename;
+        iframe.setAttribute('allow', 'autoplay'); 
+        iframe.style.position = 'absolute';
+        iframe.style.top = '0';
+        iframe.style.left = '0';
+        iframe.style.width = '100%';
+        iframe.style.height = '100%';
+        iframe.style.border = 'none';
+        iframe.style.zIndex = '10';
+        iframe.style.pointerEvents = 'auto';
+        
+        iframe.onload = () => {
+            try {
+                if (iframe.contentWindow) {
+                    iframe.contentWindow.postMessage('UNLOCK_AUDIO', '*');
+                }
+            } catch(e){}
+        };
+
+        container.appendChild(iframe);
+        activeGameFrame = iframe;
+
+        try {
+            iframe.focus();
+            if (iframe.contentWindow) iframe.contentWindow.focus();
+        } catch(e){}
+    }
+
+    let touchStartX = 0;
+    container.addEventListener('touchstart', (e) => {
+        if (e.touches && e.touches.length > 0) {
+            touchStartX = e.touches[0].clientX;
+        }
+    }, { passive: true });
+
+    container.addEventListener('touchend', (e) => {
+        if (currentMode !== 'MENU' || !e.changedTouches || e.changedTouches.length === 0) return;
+        const touchEndX = e.changedTouches[0].clientX;
+        const diffX = touchEndX - touchStartX;
+
+        if (Math.abs(diffX) > 40) {
+            playClickSound();
+            if (diffX < 0) {
+                selectedStageIndex = (selectedStageIndex + 1) % stages.length;
+            } else {
+                selectedStageIndex = (selectedStageIndex - 1 + stages.length) % stages.length;
+            }
+        }
+    }, { passive: true });
+
+    function processUserAction(clientX, clientY) {
+        enableAudioOnUserInteraction();
+
+        if (currentMode !== 'COVER' && currentMode !== 'MENU') return;
+
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = GAME_WIDTH / rect.width;
+        const scaleY = GAME_HEIGHT / rect.height;
+
+        const clickX = (clientX - rect.left) * scaleX;
+        const clickY = (clientY - rect.top) * scaleY;
+
+        const now = Date.now();
+
+        if (currentMode === 'COVER') {
+            if (clickX >= threadsBtnBounds.x && clickX <= threadsBtnBounds.x + threadsBtnBounds.w &&
+                clickY >= threadsBtnBounds.y && clickY <= threadsBtnBounds.y + threadsBtnBounds.h) {
+                window.open('https://www.threads.net/@kizoku_koshi_cosplay', '_blank');
+                return;
+            }
+
+            const btnW = 420;
+            const btnH = 54;
+            const btnX = (GAME_WIDTH - btnW) / 2;
+            const btnY = 460;
+
+            if (clickX >= btnX && clickX <= btnX + btnW && clickY >= btnY && clickY <= btnY + btnH) {
+                const timeDiff = now - lastClickTime;
+                const dist = Math.hypot(clickX - lastClickX, clickY - lastClickY);
+
+                if (timeDiff < 300 && dist < 30) {
+                    playClickSound();
+                    currentMode = 'MENU';
+                    menuAnimTimer = 0;
+                    lastClickTime = 0;
+                } else {
+                    lastClickTime = now;
+                    lastClickX = clickX;
+                    lastClickY = clickY;
+                }
+            }
+        } else if (currentMode === 'MENU') {
+            if (clickX >= prevBtnArea.x && clickX <= prevBtnArea.x + prevBtnArea.w &&
+                clickY >= prevBtnArea.y && clickY <= prevBtnArea.y + prevBtnArea.h) {
+                playClickSound();
+                selectedStageIndex = (selectedStageIndex - 1 + stages.length) % stages.length;
+                menuAnimTimer = 0;
+                return;
+            }
+
+            if (clickX >= nextBtnArea.x && clickX <= nextBtnArea.x + nextBtnArea.w &&
+                clickY >= nextBtnArea.y && clickY <= nextBtnArea.y + nextBtnArea.h) {
+                playClickSound();
+                selectedStageIndex = (selectedStageIndex + 1) % stages.length;
+                menuAnimTimer = 0;
+                return;
+            }
+
+            if (clickX >= playBtnArea.x && clickX <= playBtnArea.x + playBtnArea.w &&
+                clickY >= playBtnArea.y && clickY <= playBtnArea.y + playBtnArea.h) {
+                startStageTransition(stages[selectedStageIndex].file);
+                return;
+            }
+        }
+    }
+
+    container.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        processUserAction(e.clientX, e.clientY);
+    });
+
+    window.addEventListener('keydown', (e) => {
+        enableAudioOnUserInteraction();
+
+        if (currentMode !== 'COVER' && currentMode !== 'MENU') return;
+
+        if (currentMode === 'MENU') {
+            if (e.key === 'ArrowLeft') {
+                playClickSound();
+                selectedStageIndex = (selectedStageIndex - 1 + stages.length) % stages.length;
+                menuAnimTimer = 0;
+            } else if (e.key === 'ArrowRight') {
+                playClickSound();
+                selectedStageIndex = (selectedStageIndex + 1) % stages.length;
+                menuAnimTimer = 0;
+            } else if (e.key === 'Enter' || e.key === ' ') {
+                startStageTransition(stages[selectedStageIndex].file);
+            }
+        } else if (currentMode === 'COVER' && (e.key === 'Enter' || e.key === ' ')) {
+            playClickSound();
+            currentMode = 'MENU';
+            menuAnimTimer = 0;
+        }
+    });
+
+})();
+</script>
+
+</body>
+</html>

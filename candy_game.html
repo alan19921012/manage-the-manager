@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Tomato Memory Order Game - Candy Arcade Turbo Edition</title>
+    <!-- 💡 引入 Google Fonts 可愛像素字型 Press Start 2P -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        /* 💡 載入本地 fonts 資料夾內的「縫合像素繁體-12px-比例.ttf」 */
+        @font-face {
+            font-family: 'StitchPixelFont';
+            src: url('./fonts/縫合像素繁體-12px-比例.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+        }
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        #gameContainer {
+            position: relative;
+            width: 96vw;
+            height: 72vw;
+            max-width: 800px;
+            max-height: 600px;
+            background-color: #000;
+            box-shadow: 0 0 30px #000;
+            overflow: hidden;
+            touch-action: none;
+        }
+        #gameCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+</div>
+
+<script>
+(function() {
+    const canvas = document.getElementById('gameCanvas');
+    const container = document.getElementById('gameContainer');
+
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    const GAME_WIDTH = 800;
+    const GAME_HEIGHT = 600;
+
+    // 離屏 Canvas 模擬微粒膠捲質感 (Film Grain)
+    const noiseCanvas = document.createElement('canvas');
+    noiseCanvas.width = 160;
+    noiseCanvas.height = 120;
+    const noiseCtx = noiseCanvas.getContext('2d');
+
+    function updateFilmGrain() {
+        if (!noiseCtx) return;
+        const imgData = noiseCtx.createImageData(160, 120);
+        const buffer = new Uint32Array(imgData.data.buffer);
+        const len = buffer.length;
+        for (let i = 0; i < len; i++) {
+            const val = Math.floor(Math.random() * 255);
+            buffer[i] = (22 << 24) | (val << 16) | (val << 8) | val;
+        }
+        noiseCtx.putImageData(imgData, 0, 0);
+    }
+
+    function drawFilmGrainOverlay() {
+        ctx.save();
+        ctx.globalCompositeOperation = 'overlay';
+        ctx.globalAlpha = 0.35;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(noiseCanvas, 0, 0, GAME_WIDTH, GAME_HEIGHT);
+        ctx.restore();
+    }
+
+    function loadSafeImage(baseNames) {
+        const obj = { isReady: false, img: new Image() };
+        const nameList = Array.isArray(baseNames) ? baseNames : [baseNames];
+        let sources = [];
+        for (let name of nameList) {
+            sources.push(`images/${name}.png`);
+            sources.push(`images/${name}.jpg`);
+            sources.push(`./images/${name}.png`);
+            sources.push(`./images/${name}.jpg`);
+            sources.push(`${name}.png`);
+            sources.push(`${name}.jpg`);
+        }
+        
+        let srcIdx = 0;
+
+        obj.img.onload = () => {
+            if (obj.img.naturalWidth > 0 && obj.img.naturalHeight > 0) {
+                obj.isReady = true;
+            }
+        };
+
+        obj.img.onerror = () => {
+            srcIdx++;
+            if (srcIdx < sources.length) {
+                obj.img.src = sources[srcIdx];
+            } else {
+                obj.isReady = false;
+            }
+        };
+
+        obj.img.src = sources[0];
+        return obj;
+    }
+
+    let candyBgs = [];
+    let tomatoImgs = {};
+
+    try {
+        for (let i = 1; i <= 6; i++) {
+            candyBgs.push(loadSafeImage(`candy${i}`));
+        }
+
+        // 💡 優先載入番茄圖檔
+        tomatoImgs['normal'] = loadSafeImage(['tomato1', 'normal', 'tomato_normal', 'candy_tomato1']);
+        tomatoImgs['golden'] = loadSafeImage(['tomato2', 'golden', 'tomato_golden', 'candy_tomato2']);
+        tomatoImgs['rotten'] = loadSafeImage(['tomato3', 'rotten', 'tomato_rotten', 'candy_tomato3']);
+    } catch(e) {}
+
+    let score = 0;
+    let hp = 3;
+    const maxHp = 3;
+    let level = 1;
+
+    // 💡 倒數計時相關變數
+    let gameStarted = false;
+    let isCountingDown = true;
+    let countdownStep = -1;
+    let countdownTimer = 0;
+
+    let gameOver = false;
+    let isPaused = false;
+    let gameOverLockTime = 0;
+    let glowTimer = 0;
+    let lastTapTime = 0;
+
+    let bgAnimTimer = 0;
+
+    // 🔥 Fever Mode 變數
+    let comboCount = 0;
+    let isFever = false;
+    let feverTimer = 0;
+    const MAX_FEVER_TIME = 6.0;
+    let feverCooldown = 0;
+    let screenShake = 0;
+    let shakeOffsetX = 0;
+    let shakeOffsetY = 0;
+
+    const tomatoTypes = ['normal', 'golden', 'rotten'];
+    let gameState = 'SHOWING'; // 'SHOWING' | 'INPUT' | 'SUCCESS_ANIM' | 'WAIT' | 'FEVER'
+
+    let targetSequence = [];
+    let playerSequence = [];
+
+    let showIndex = 0;
+    let showTimer = 0;
+    const SHOW_INTERVAL = 0.8;
+
+    let maxTime = 5.0;
+    let timeRemaining = 5.0;
+
+    let lastTime = Date.now();
+    let audioCtx = null;
+
+    let particles = [];
+    let bottomEmitters = [];
+
+    const buttons = [
+        { id: 0, type: 'normal', x: 162, y: 510, w: 136, h: 68, color: '#00e676', bg: '#1b5e20', pressed: 0 },
+        { id: 1, type: 'golden', x: 332, y: 510, w: 136, h: 68, color: '#ffea00', bg: '#854d0e', pressed: 0 },
+        { id: 2, type: 'rotten', x: 502, y: 510, w: 136, h: 68, color: '#ff1744', bg: '#881337', pressed: 0 }
+    ];
+
+    let floatingTexts = [];
+
+    // 💡 獨立模式 AudioContext + 事件解鎖機制
+    function initAudioContext() {
+        try {
+            if (!audioCtx) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (AudioContextClass) audioCtx = new AudioContextClass();
+            }
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        } catch(e) {}
+    }
+
+    // 💡 監聽父頁面 UNLOCK_AUDIO 通知
+    window.addEventListener('message', (e) => {
+        if (e.data === 'UNLOCK_AUDIO' || (e.data && e.data.action === 'UNLOCK_AUDIO')) {
+            initAudioContext();
+        }
+    });
+
+    window.addEventListener('pointerdown', initAudioContext, { passive: true });
+    window.addEventListener('touchstart', initAudioContext, { passive: true });
+
+    function handlePauseState(shouldPause) {
+        if (shouldPause) {
+            isPaused = true;
+        } else {
+            isPaused = false;
+            lastTime = Date.now();
+        }
+    }
+
+    document.addEventListener('visibilitychange', () => handlePauseState(document.hidden || document.webkitHidden));
+    window.addEventListener('blur', () => handlePauseState(true));
+    window.addEventListener('focus', () => handlePauseState(false));
+
+    function playSound(type) {
+        if (isPaused) return;
+        try {
+            initAudioContext();
+            if (!audioCtx) return;
+
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+
+            if (type === 'press') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(400, now);
+                osc.frequency.exponentialRampToValueAtTime(600, now + 0.05);
+                gain.gain.setValueAtTime(0.2, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.05);
+                osc.start(now);
+                osc.stop(now + 0.05);
+            } else if (type === 'success') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(523, now);
+                osc.frequency.setValueAtTime(659, now + 0.08);
+                osc.frequency.setValueAtTime(783, now + 0.16);
+                gain.gain.setValueAtTime(0.25, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.25);
+                osc.start(now);
+                osc.stop(now + 0.25);
+            } else if (type === 'fever') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(523, now);
+                osc.frequency.setValueAtTime(659, now + 0.08);
+                osc.frequency.setValueAtTime(880, now + 0.16);
+                gain.gain.setValueAtTime(0.4, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.3);
+                osc.start(now);
+                osc.stop(now + 0.3);
+            } else if (type === 'fail') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(220, now);
+                osc.frequency.linearRampToValueAtTime(110, now + 0.25);
+                gain.gain.setValueAtTime(0.3, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.25);
+                osc.start(now);
+                osc.stop(now + 0.25);
+            } else if (type === 'beep') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(440, now);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+                osc.start(now);
+                osc.stop(now + 0.15);
+            } else if (type === 'beep_final') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(880, now);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                osc.start(now);
+                osc.stop(now + 0.3);
+            }
+        } catch(e) {}
+    }
+
+    function drawOutlinedText(text, x, y, font, align = 'center', fillStyle = '#ffffff') {
+        ctx.save();
+        ctx.font = font;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+
+        ctx.fillStyle = '#000000';
+        const offsets = [
+            [-2, 0], [2, 0], [0, -2], [0, 2],
+            [-1, -1], [1, -1], [-1, 1], [1, 1]
+        ];
+        for (let [ox, oy] of offsets) {
+            ctx.fillText(text, x + ox, y + oy);
+        }
+
+        ctx.fillStyle = fillStyle;
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
+    class Particle {
+        constructor(x, y, color, customVx = null, customVy = null) {
+            this.x = x;
+            this.y = y;
+            this.vx = customVx !== null ? customVx : (Math.random() - 0.5) * 18;
+            this.vy = customVy !== null ? customVy : (-Math.random() * 14 - 5);
+            this.size = Math.random() * 6 + 8;
+            this.color = color;
+            this.life = 30;
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += 0.5;
+            this.life--;
+        }
+        draw() {
+            if (this.life <= 0) return;
+            ctx.fillStyle = this.color;
+            ctx.fillRect(Math.round(this.x), Math.round(this.y), this.size, this.size);
+        }
+    }
+
+    class BottomCandyEmitter {
+        constructor(isLeftCorner = null) {
+            const sideLeft = (isLeftCorner !== null) ? isLeftCorner : (Math.random() < 0.5);
+            if (sideLeft) {
+                this.x = Math.random() * 150;
+                this.vx = Math.random() * 8 + 3;
+            } else {
+                this.x = 650 + Math.random() * 150;
+                this.vx = -(Math.random() * 8 + 3);
+            }
+            
+            this.y = GAME_HEIGHT + 15;
+            const targetHeight = GAME_HEIGHT * (0.35 + Math.random() * 0.25);
+            this.gravity = 0.55;
+            this.vy = -Math.sqrt(2 * this.gravity * targetHeight);
+            this.life = 55;
+            this.candyChar = Math.random() < 0.5 ? '🍬' : '🍭';
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += this.gravity;
+            this.life--;
+        }
+        draw() {
+            if (this.life <= 0) return;
+            drawOutlinedText(this.candyChar, Math.round(this.x), Math.round(this.y), '72px sans-serif', 'center');
+        }
+    }
+
+    class BottomTomatoEmitter {
+        constructor(isLeftCorner = null) {
+            const sideLeft = (isLeftCorner !== null) ? isLeftCorner : (Math.random() < 0.5);
+            if (sideLeft) {
+                this.x = Math.random() * 150;
+                this.vx = Math.random() * 8 + 3;
+            } else {
+                this.x = 650 + Math.random() * 150;
+                this.vx = -(Math.random() * 8 + 3);
+            }
+            
+            this.y = GAME_HEIGHT + 15;
+            const targetHeight = GAME_HEIGHT * (0.35 + Math.random() * 0.25);
+            this.gravity = 0.55;
+            this.vy = -Math.sqrt(2 * this.gravity * targetHeight);
+            this.life = 55;
+            this.size = Math.random() * 13 + 65;
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += this.gravity;
+            this.life--;
+        }
+        draw() {
+            if (this.life <= 0) return;
+            drawClassicTomato(Math.round(this.x), Math.round(this.y), 'normal', this.size);
+        }
+    }
+
+    function drawPixelBox(x, y, w, h, bgColor, borderColor, shadowColor = '#000000', pixelSize = 4) {
+        ctx.save();
+        ctx.fillStyle = shadowColor;
+        ctx.fillRect(x + pixelSize, y + pixelSize, w, h);
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = borderColor;
+        ctx.fillRect(x, y, w, pixelSize); 
+        ctx.fillRect(x, y + h - pixelSize, w, pixelSize); 
+        ctx.fillRect(x, y, pixelSize, h); 
+        ctx.fillRect(x + w - pixelSize, y, pixelSize, h); 
+        ctx.restore();
+    }
+
+    function drawPixelText(text, x, y, color = '#ffffff', fontSize = 18, align = 'center', useOnlyStitchFont = false) {
+        ctx.save();
+        if (useOnlyStitchFont) {
+            ctx.font = `${fontSize}px "StitchPixelFont", monospace`;
+        } else {
+            ctx.font = `${fontSize}px "Press Start 2P", "StitchPixelFont", monospace`;
+        }
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+
+        ctx.fillStyle = '#000000';
+        const offsets = [[-2,0], [2,0], [0,-2], [0,2], [-2,-2], [2,-2], [-2,2], [2,2]];
+        for (let [ox, oy] of offsets) {
+            ctx.fillText(text, x + ox, y + oy);
+        }
+
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
+    function drawCreamyPixelText(text, x, y, color = '#fff59d', fontSize = 20, align = 'left') {
+        ctx.save();
+        ctx.font = `${fontSize}px "Press Start 2P", "StitchPixelFont", monospace`;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+
+        ctx.fillStyle = '#000000';
+        const offsets = [
+            [-2, 0], [2, 0], [0, -2], [0, 2],
+            [-2, -2], [2, -2], [-2, 2], [2, 2]
+        ];
+        for (let [ox, oy] of offsets) {
+            ctx.fillText(text, x + ox, y + oy);
+        }
+
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
+    function drawPixelTomatoIcon(cx, cy, scale = 1.0) {
+        ctx.save();
+        ctx.translate(Math.round(cx), Math.round(cy));
+        ctx.scale(scale, scale);
+
+        let mainColor = '#d50000';
+        let highlightColor = '#ff8a80';
+        let stemColor = '#1b5e20';
+
+        ctx.fillStyle = stemColor;
+        ctx.fillRect(-6, -22, 12, 6);
+        ctx.fillRect(-3, -25, 6, 4);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        ctx.fillStyle = highlightColor;
+        ctx.fillRect(-12, -12, 8, 8);
+        ctx.restore();
+    }
+
+    class FloatingText {
+        constructor(text, color, fontSize = 20) {
+            this.text = text;
+            this.color = color;
+            this.fontSize = fontSize;
+            this.x = GAME_WIDTH / 2;
+            this.y = 280;
+            this.opacity = 1.0;
+        }
+        update() {
+            this.y -= 1.5;
+            this.opacity -= 0.025;
+        }
+        draw() {
+            if (this.opacity <= 0) return;
+            drawPixelText(this.text, this.x, this.y, this.color, this.fontSize, 'center');
+        }
+    }
+
+    function getLevelParams(lvl) {
+        const extraTomatoes = Math.floor((lvl - 1) / 3);
+        const sequenceLength = Math.min(10, 3 + extraTomatoes);
+        const calculatedTime = 5.0 + (sequenceLength - 3) * 1.5;
+        return { sequenceLength, timeLimit: calculatedTime };
+    }
+
+    function startLevel() {
+        if (feverCooldown > 0) return;
+
+        const params = getLevelParams(level);
+        maxTime = params.timeLimit;
+        timeRemaining = maxTime;
+
+        targetSequence = [];
+        for (let i = 0; i < params.sequenceLength; i++) {
+            const randType = tomatoTypes[Math.floor(Math.random() * tomatoTypes.length)];
+            targetSequence.push(randType);
+        }
+
+        playerSequence = [];
+        showIndex = 0;
+        showTimer = 0;
+        gameState = 'SHOWING';
+    }
+
+    function triggerFeverMode() {
+        isFever = true;
+        feverTimer = MAX_FEVER_TIME;
+        comboCount = 0;
+        screenShake = 22;
+        gameState = 'FEVER';
+        playSound('fever');
+
+        for (let i = 0; i < 13; i++) bottomEmitters.push(new BottomCandyEmitter(true));
+        for (let i = 0; i < 13; i++) bottomEmitters.push(new BottomCandyEmitter(false));
+        for (let i = 0; i < 9; i++) bottomEmitters.push(new BottomTomatoEmitter(true));
+        for (let i = 0; i < 9; i++) bottomEmitters.push(new BottomTomatoEmitter(false));
+    }
+
+    function drawClassicTomato(x, y, type, targetSize = 41) {
+        ctx.save();
+
+        const imgObj = tomatoImgs[type];
+        if (imgObj && imgObj.isReady && imgObj.img && imgObj.img.complete && imgObj.img.naturalWidth > 0) {
+            try {
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+                ctx.drawImage(imgObj.img, x - targetSize / 2, y - targetSize / 2, targetSize, targetSize);
+                ctx.restore();
+                return;
+            } catch(e) {}
+        }
+
+        // 純 Canvas 備用繪製像素番茄
+        ctx.translate(Math.round(x), Math.round(y));
+        const scale = (targetSize / 42) * 0.9;
+        ctx.scale(scale, scale);
+
+        if (type === 'golden') {
+            const alpha = 0.45 + Math.sin(glowTimer) * 0.25;
+            ctx.fillStyle = `rgba(255, 178, 0, ${alpha})`; 
+            ctx.beginPath();
+            ctx.arc(0, 0, 32, 0, Math.PI * 2); 
+            ctx.fill();
+        }
+
+        let mainColor = '#d50000';
+        let highlightColor = '#ff8a80';
+        let stemColor = '#1b5e20';
+
+        if (type === 'golden') {
+            mainColor = '#e53935';
+            highlightColor = '#fff59d';
+            stemColor = '#76ff03';
+        } else if (type === 'rotten') {
+            mainColor = '#6a1b29';
+            highlightColor = '#a73a4b';
+            stemColor = '#33691e';
+        }
+
+        ctx.fillStyle = stemColor;
+        ctx.fillRect(-6, -22, 12, 6);
+        ctx.fillRect(-3, -25, 6, 4);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        if (type === 'rotten') {
+            ctx.fillStyle = '#2d0812';
+            ctx.fillRect(-14, 2, 28, 17);
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(-10, 8, 20, 10);
+        }
+
+        ctx.fillStyle = highlightColor;
+        ctx.fillRect(-12, -12, 8, 8);
+
+        ctx.restore();
+    }
+
+    function handlePlayerInput(type) {
+        if (gameState !== 'INPUT' || gameOver || isCountingDown) return;
+
+        playerSequence.push(type);
+        playSound('press');
+
+        const currentIndex = playerSequence.length - 1;
+
+        if (playerSequence[currentIndex] !== targetSequence[currentIndex]) {
+            gameState = 'WAIT';
+            playSound('fail');
+            hp--;
+            comboCount = 0;
+            floatingTexts.push(new FloatingText("WRONG ORDER! -1 ❤️", '#ff1744'));
+
+            if (hp <= 0) {
+                hp = 0;
+                gameOver = true;
+                gameOverLockTime = 0.5;
+            } else {
+                setTimeout(startLevel, 1000);
+            }
+            return;
+        }
+
+        if (playerSequence.length === targetSequence.length) {
+            gameState = 'SUCCESS_ANIM';
+            
+            const earnedScore = targetSequence.length * 150;
+            score += earnedScore;
+
+            playSound('success');
+            floatingTexts.push(new FloatingText(`PERFECT! +${earnedScore}`, '#00e676'));
+
+            if (level >= 2) {
+                comboCount++;
+                if (comboCount >= 4) {
+                    setTimeout(triggerFeverMode, 600);
+                    return;
+                }
+            }
+
+            level++;
+            setTimeout(startLevel, 2500);
+        }
+    }
+
+    // 💡 倒數處理
+    function handleCountdown(delta) {
+        if (!isCountingDown) return;
+
+        countdownTimer += delta;
+
+        const steps = [
+            { text: '3', color: '#ffffff', sound: 'beep' },
+            { text: '2', color: '#ffea00', sound: 'beep' },
+            { text: '1', color: '#ff9800', sound: 'beep' },
+            { text: 'START!', color: '#ff1744', sound: 'beep_final' }
+        ];
+
+        const stepInterval = 0.85;
+        const currentIdx = Math.floor(countdownTimer / stepInterval);
+
+        if (currentIdx !== countdownStep && currentIdx < steps.length) {
+            countdownStep = currentIdx;
+            playSound(steps[countdownStep].sound);
+        }
+
+        if (currentIdx >= steps.length) {
+            isCountingDown = false;
+            gameStarted = true;
+            startLevel();
+            return;
+        }
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+        ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+        ctx.lineWidth = 2;
+        const lineSpacing = 10;
+
+        for (let x = -GAME_HEIGHT; x < GAME_WIDTH + GAME_HEIGHT; x += lineSpacing) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x + GAME_HEIGHT, GAME_HEIGHT);
+            ctx.stroke();
+        }
+
+        for (let x = GAME_WIDTH + GAME_HEIGHT; x > -GAME_HEIGHT; x -= lineSpacing * 1.5) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x - GAME_HEIGHT, GAME_HEIGHT);
+            ctx.stroke();
+        }
+
+        const step = steps[countdownStep] || steps[0];
+        const progressInStep = (countdownTimer % stepInterval) / stepInterval;
+        const scale = 1.0 + Math.sin(progressInStep * Math.PI) * 0.35; 
+
+        ctx.translate(GAME_WIDTH / 2, GAME_HEIGHT / 2);
+        ctx.scale(scale, scale);
+        drawPixelText(step.text, 0, 0, step.color, 76, 'center');
+        ctx.restore();
+    }
+
+    function updateGame(delta) {
+        glowTimer += delta * 5.0;
+        bgAnimTimer += delta * (isFever ? 1.3 : 1.0);
+
+        if (!gameStarted || gameOver || isPaused || isCountingDown) return;
+
+        if (screenShake > 0) {
+            shakeOffsetX = (Math.random() - 0.5) * screenShake * 2;
+            shakeOffsetY = (Math.random() - 0.5) * screenShake * 2;
+            screenShake *= 0.82;
+            if (screenShake < 0.5) {
+                screenShake = 0;
+                shakeOffsetX = 0;
+                shakeOffsetY = 0;
+            }
+        } else {
+            shakeOffsetX = 0;
+            shakeOffsetY = 0;
+        }
+
+        if (isFever) {
+            feverTimer -= delta;
+            if (feverTimer <= 0) {
+                isFever = false;
+                feverTimer = 0;
+                feverCooldown = 1.5;
+                gameState = 'WAIT';
+            }
+        } else if (feverCooldown > 0) {
+            feverCooldown -= delta;
+            if (feverCooldown <= 0) {
+                feverCooldown = 0;
+                level++;
+                startLevel();
+            }
+        }
+
+        for (let btn of buttons) {
+            if (btn.pressed > 0) btn.pressed -= delta * 10;
+        }
+
+        if (gameState === 'SHOWING') {
+            showTimer += delta;
+            if (showTimer >= SHOW_INTERVAL) {
+                showTimer = 0;
+                showIndex++;
+                
+                const extraDelay = (targetSequence.length >= 6) ? 2.0 : 0.0;
+                if (showIndex > targetSequence.length + (extraDelay / SHOW_INTERVAL)) {
+                    playerSequence = [];
+                    gameState = 'INPUT';
+                }
+            }
+        } 
+        else if (gameState === 'INPUT') {
+            timeRemaining -= delta;
+            if (timeRemaining <= 0) {
+                timeRemaining = 0;
+                gameState = 'WAIT';
+                playSound('fail');
+                hp--;
+                comboCount = 0;
+                floatingTexts.push(new FloatingText("TIME OUT! -1 ❤️", '#ff1744'));
+
+                if (hp <= 0) {
+                    hp = 0;
+                    gameOver = true;
+                    gameOverLockTime = 0.5;
+                } else {
+                    setTimeout(startLevel, 1000);
+                }
+            }
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+            particles[i].update();
+            if (particles[i].life <= 0) particles.splice(i, 1);
+        }
+
+        for (let i = bottomEmitters.length - 1; i >= 0; i--) {
+            bottomEmitters[i].update();
+            if (bottomEmitters[i].life <= 0) bottomEmitters.splice(i, 1);
+        }
+
+        for (let i = floatingTexts.length - 1; i >= 0; i--) {
+            floatingTexts[i].update();
+            if (floatingTexts[i].opacity <= 0) floatingTexts.splice(i, 1);
+        }
+
+        updateFilmGrain();
+    }
+
+    function drawTomatoSequence(list, startX, startY, maxPerLine = 5, size = 41, spacingX = 58, spacingY = 52) {
+        for (let i = 0; i < list.length; i++) {
+            const col = i % maxPerLine;
+            const row = Math.floor(i / maxPerLine);
+            const x = startX + col * spacingX;
+            const y = startY + row * spacingY;
+            drawClassicTomato(x, y, list[i], size);
+        }
+    }
+
+    function drawAnimatedBackground() {
+        let currentBgObj = null;
+
+        if (isFever) {
+            const frameToggle = Math.floor(bgAnimTimer / 0.5) % 2;
+            currentBgObj = frameToggle === 0 ? candyBgs[0] : candyBgs[1];
+        } else if (gameState === 'SUCCESS_ANIM') {
+            const seq = [candyBgs[2], candyBgs[0], candyBgs[3], candyBgs[1]];
+            const frameIdx = Math.floor(bgAnimTimer / 0.8) % 4;
+            currentBgObj = seq[frameIdx];
+        } else {
+            if (targetSequence.length >= 6) {
+                const frameToggle = Math.floor(bgAnimTimer / 0.5) % 2;
+                currentBgObj = frameToggle === 0 ? candyBgs[4] : candyBgs[5];
+            } else {
+                const frameToggle = Math.floor(bgAnimTimer / 0.5) % 2;
+                currentBgObj = frameToggle === 0 ? candyBgs[0] : candyBgs[1];
+            }
+        }
+
+        let isDrawn = false;
+        if (currentBgObj && currentBgObj.isReady && currentBgObj.img && currentBgObj.img.complete && currentBgObj.img.naturalWidth > 0) {
+            try {
+                ctx.save();
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+                ctx.drawImage(currentBgObj.img, 0, 0, GAME_WIDTH, GAME_HEIGHT);
+                isDrawn = true;
+            } catch(e) {}
+        }
+
+        if (!isDrawn) {
+            let grad = ctx.createLinearGradient(0, 0, 0, GAME_HEIGHT);
+            grad.addColorStop(0, '#1a102f');
+            grad.addColorStop(1, '#05020a');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+        }
+    }
+
+    function drawUI() {
+        ctx.save();
+        if (screenShake > 0) {
+            ctx.translate(shakeOffsetX, shakeOffsetY);
+        }
+
+        const sequenceStartX = 110;
+        const areaY = 230;
+
+        if (isFever) {
+            drawCreamyPixelText("BREAK THE RULES!!", 80, areaY + 30, '#fff59d', 20, 'left');
+        } else if (feverCooldown <= 0) {
+            if (gameState === 'SHOWING') {
+                const currentShowList = targetSequence.slice(0, Math.min(showIndex, targetSequence.length));
+                drawTomatoSequence(currentShowList, sequenceStartX, areaY + 30, 5, 41, 58, 52);
+            } else if (gameState === 'INPUT' || gameState === 'WAIT') {
+                drawTomatoSequence(playerSequence, sequenceStartX, areaY + 30, 5, 41, 58, 52);
+            }
+        }
+
+        if (gameState === 'INPUT') {
+            const barW = 288;
+            const barH = 20;
+            const barX = 88;
+            const barY = 395;
+
+            const progress = Math.max(0, timeRemaining / maxTime);
+            drawPixelBox(barX, barY, barW, barH, '#222222', '#ffffff', '#000000', 3);
+            
+            const barColor = progress < 0.33 ? '#ff1744' : (progress < 0.66 ? '#ffea00' : '#00e676');
+            ctx.fillStyle = barColor;
+            ctx.fillRect(barX + 3, barY + 3, (barW - 6) * progress, barH - 6);
+
+            drawPixelText(`${timeRemaining.toFixed(1)}s`, barX + barW / 2, barY + 42, '#ffffff', 14, 'center');
+        }
+
+        for (let btn of buttons) {
+            const pressOffset = btn.pressed > 0 ? 4 : 0;
+            const isSelectable = (gameState === 'INPUT' || isFever);
+            const bgColor = isSelectable ? (isFever ? '#854d0e' : btn.bg) : '#222222';
+            const borderColor = isSelectable ? (isFever ? '#ffea00' : btn.color) : '#555555';
+
+            drawPixelBox(
+                btn.x, 
+                btn.y + pressOffset, 
+                btn.w, 
+                btn.h - pressOffset, 
+                bgColor, 
+                borderColor, 
+                '#000000', 
+                btn.pressed > 0 ? 2 : 4
+            );
+
+            if (isFever) {
+                drawOutlinedText(
+                    '🍬', 
+                    btn.x + btn.w / 2, 
+                    btn.y + btn.h / 2 + pressOffset, 
+                    '60px sans-serif', 
+                    'center'
+                );
+            } else {
+                drawClassicTomato(
+                    btn.x + btn.w / 2, 
+                    btn.y + btn.h / 2 + pressOffset, 
+                    btn.type, 
+                    54
+                );
+            }
+        }
+
+        drawPixelBox(20, 20, 240, 50, '#111111', '#ffffff', '#000000', 4);
+        drawPixelText(`SCORE:${score}`, 140, 47, '#ffffff', 14, 'center');
+
+        let heartsStr = '';
+        for (let i = 0; i < maxHp; i++) heartsStr += (i < hp) ? '❤️' : '🖤';
+        const hpColor = hp <= 1 ? '#ff1744' : '#ffeb3b';
+        drawPixelBox(GAME_WIDTH - 260, 20, 240, 50, '#111111', hpColor, '#000000', 4);
+        drawPixelText(`HP:${heartsStr}`, GAME_WIDTH - 140, 47, hpColor, 14, 'center');
+
+        const fBarX = 280;
+        const fBarY = 32;
+        const fBarW = 240;
+        const fBarH = 22;
+        const radius = 11;
+
+        let fBorderColor = '#555555';
+        let fFillRatio = 0;
+
+        if (isFever) {
+            const flashTick = Math.floor(Date.now() / 60) % 3;
+            fBorderColor = flashTick === 0 ? '#ffea00' : (flashTick === 1 ? '#ff1744' : '#ffffff');
+            fFillRatio = Math.max(0, feverTimer / MAX_FEVER_TIME);
+        } else {
+            fBorderColor = comboCount > 0 ? '#ff1744' : '#555555';
+            fFillRatio = Math.min(1.0, comboCount / 4.0);
+        }
+
+        function drawRoundedBarPath(x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.arc(x + r, y + r, r, Math.PI * 0.5, Math.PI * 1.5);
+            ctx.lineTo(x + w - r, y);
+            ctx.arc(x + w - r, y + r, r, Math.PI * 1.5, Math.PI * 0.5);
+            ctx.lineTo(x + r, y + h);
+            ctx.closePath();
+        }
+
+        ctx.save();
+        ctx.fillStyle = '#000000';
+        drawRoundedBarPath(fBarX + 3, fBarY + 3, fBarW, fBarH, radius);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
+        drawRoundedBarPath(fBarX, fBarY, fBarW, fBarH, radius);
+        ctx.fill();
+
+        ctx.strokeStyle = fBorderColor;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        if (fFillRatio > 0) {
+            ctx.save();
+            drawRoundedBarPath(fBarX, fBarY, fBarW, fBarH, radius);
+            ctx.clip();
+
+            const fillW = fBarW * fFillRatio;
+
+            const cycle = (Date.now() % 3000) / 3000;
+            const shift = (Math.sin(cycle * Math.PI * 2) + 1) / 2;
+
+            const grad = ctx.createLinearGradient(fBarX, fBarY, fBarX + fBarW, fBarY);
+            if (shift < 0.5) {
+                grad.addColorStop(0, '#ff1744');
+                grad.addColorStop(0.5 + shift, '#ffea00');
+                grad.addColorStop(1, '#ff1744');
+            } else {
+                grad.addColorStop(0, '#ffea00');
+                grad.addColorStop(shift - 0.5, '#ff1744');
+                grad.addColorStop(1, '#ffea00');
+            }
+
+            ctx.fillStyle = grad;
+            ctx.fillRect(fBarX, fBarY, fillW, fBarH);
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.fillRect(fBarX, fBarY, fillW, 3);
+            ctx.restore();
+        }
+
+        // 💡 調整：進度條中央的番茄縮小為 50px
+        drawClassicTomato(fBarX + fBarW / 2, fBarY + fBarH / 2, 'normal', 50);
+        ctx.restore();
+
+        // 💡 調整：Fever Mode 時顯示與 gao_game 一致的「BREAK THE RULES!」發光標題
+        if (isFever) {
+            drawPixelText("🔥BREAK THE RULES!!🔥", GAME_WIDTH / 2, fBarY - 14, '#ffea00', 12, 'center');
+        }
+
+        for (let p of particles) p.draw();
+        for (let b of bottomEmitters) b.draw();
+        for (let ft of floatingTexts) ft.draw();
+
+        ctx.restore();
+
+        // 💡 遊戲結束結算畫面
+        if (gameOver) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.90)';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+            drawPixelBox(100, 70, 600, 460, '#111111', '#ff1744', '#000000', 6);
+            drawPixelText('GAME OVER', GAME_WIDTH / 2, 130, '#ff1744', 28, 'center');
+            drawPixelText(`FINAL SCORE: ${score}`, GAME_WIDTH / 2, 190, '#ffeb3b', 16, 'center');
+
+            if (gameOverLockTime > 0) {
+                drawPixelText(`PLEASE WAIT...`, GAME_WIDTH / 2, 280, '#888888', 14, 'center');
+            } else {
+                // 1. CONTINUE? 按鈕
+                drawPixelBox(180, 260, 440, 50, '#d50000', '#ffea00', '#000000', 4);
+                drawPixelText('CONTINUE?', GAME_WIDTH / 2, 285, '#ffffff', 14, 'center');
+
+                // 2. GONNA STOP? 按鈕
+                drawPixelBox(180, 330, 440, 50, '#333333', '#ffffff', '#000000', 4);
+                drawPixelText('GONNA STOP?', GAME_WIDTH / 2, 355, '#ff4081', 14, 'center');
+
+                // 3. 按此觀看COLLAR《管理還管你》MV 按鈕
+                const mvBtnX = 155;
+                const mvBtnY = 430;
+                const mvBtnW = 490;
+                const mvBtnH = 70;
+                drawPixelBox(mvBtnX, mvBtnY, mvBtnW, mvBtnH, '#ffffff', '#C1001B', '#000000', 4);
+                
+                drawPixelTomatoIcon(mvBtnX + 28, mvBtnY + mvBtnH / 2, 1.0);
+                drawPixelText('按此觀看COLLAR《管理還管你》MV', GAME_WIDTH / 2, mvBtnY + mvBtnH / 2, '#ffffff', 21, 'center', true);
+                drawPixelTomatoIcon(mvBtnX + mvBtnW - 28, mvBtnY + mvBtnH / 2, 1.0);
+            }
+        }
+    }
+
+    function resetGame() {
+        score = 0;
+        hp = 3;
+        level = 1;
+        comboCount = 0;
+        isFever = false;
+        feverTimer = 0;
+        feverCooldown = 0;
+        gameOver = false;
+        gameOverLockTime = 0;
+        particles = [];
+        bottomEmitters = [];
+        floatingTexts = [];
+
+        // 💡 重新倒數
+        gameStarted = false;
+        isCountingDown = true;
+        countdownStep = -1;
+        countdownTimer = 0;
+    }
+
+    function renderFrame() {
+        try {
+            const now = Date.now();
+            const delta = Math.min((now - lastTime) / 1000, 0.1);
+            lastTime = now;
+
+            ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+            drawAnimatedBackground();
+            updateGame(delta);
+
+            if (gameOver && gameOverLockTime > 0) {
+                gameOverLockTime = Math.max(0, gameOverLockTime - delta);
+            }
+
+            drawUI();
+
+            if (isCountingDown) {
+                handleCountdown(delta);
+            }
+
+            drawFilmGrainOverlay();
+
+        } catch(err) {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+            drawPixelText('ERROR DETECTED', GAME_WIDTH/2, 280, '#ff1744', 18, 'center');
+            drawPixelText(String(err.message || err), GAME_WIDTH/2, 320, '#ffffff', 12, 'center');
+        }
+    }
+
+    setInterval(renderFrame, 1000 / 60);
+
+    function handleTap(clientX, clientY) {
+        if (isPaused) return;
+
+        const now = Date.now();
+        if (now - lastTapTime < 80) return;
+        lastTapTime = now;
+
+        initAudioContext();
+
+        if (isCountingDown) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = GAME_WIDTH / rect.width;
+        const scaleY = GAME_HEIGHT / rect.height;
+
+        const clickX = (clientX - rect.left) * scaleX;
+        const clickY = (clientY - rect.top) * scaleY;
+
+        // 💡 結算點擊邏輯 (升級 GONNA STOP? 多重備援重置機制)
+        if (gameOver && gameOverLockTime <= 0) {
+            // 1. CONTINUE? 按鈕
+            if (clickX >= 180 && clickX <= 620 && clickY >= 260 && clickY <= 310) {
+                resetGame();
+                return;
+            }
+            // 2. GONNA STOP? 按鈕：多重備援重新整理
+            if (clickX >= 180 && clickX <= 620 && clickY >= 330 && clickY <= 380) {
+                try {
+                    // 💡 第一優先：讓最外層視窗進行 F5 全頁面刷新，避免父頁面轉場遮罩殘留
+                    if (window.top && window.top !== window) {
+                        window.top.location.reload();
+                    } else {
+                        window.location.reload();
+                    }
+                } catch (err) {
+                    // 💡 第二備援：同源阻擋時向父頁面發送 reload 訊息
+                    if (window.parent) {
+                        window.parent.postMessage({ action: 'RELOAD_GAME' }, '*');
+                    } else {
+                        // 💡 最終保險
+                        window.location.reload();
+                    }
+                }
+                return;
+            }
+            // 3. COLLAR MV 按鈕
+            if (clickX >= 155 && clickX <= 645 && clickY >= 430 && clickY <= 500) {
+                window.open('https://youtu.be/4DObQP77xAs?si=lQ__OsG39YGlsKWd', '_blank');
+                return;
+            }
+            return;
+        }
+
+        if (isFever) {
+            score += 300;
+            screenShake = 12;
+            playSound('press');
+
+            floatingTexts.push(new FloatingText("+300 🍬", '#ffea00', 20));
+
+            const pColors = ['#ffea00', '#00e676', '#ff1744', '#00b0ff', '#ff4081', '#ffffff'];
+            
+            for (let i = 0; i < 12; i++) {
+                particles.push(new Particle(clickX, clickY, pColors[Math.floor(Math.random() * pColors.length)]));
+            }
+
+            for (let i = 0; i < 6; i++) {
+                particles.push(new Particle(30, GAME_HEIGHT - 20, pColors[Math.floor(Math.random() * pColors.length)], Math.random() * 8 + 3, -Math.random() * 12 - 6));
+                particles.push(new Particle(GAME_WIDTH - 30, GAME_HEIGHT - 20, pColors[Math.floor(Math.random() * pColors.length)], -(Math.random() * 8 + 3), -Math.random() * 12 - 6));
+            }
+
+            for (let i = 0; i < 2; i++) {
+                bottomEmitters.push(new BottomCandyEmitter(true));
+                bottomEmitters.push(new BottomCandyEmitter(false));
+            }
+
+            for (let i = 0; i < 2; i++) {
+                bottomEmitters.push(new BottomTomatoEmitter(true));
+                bottomEmitters.push(new BottomTomatoEmitter(false));
+            }
+            return;
+        }
+
+        if (gameState === 'INPUT') {
+            for (let btn of buttons) {
+                if (clickX >= btn.x && clickX <= btn.x + btn.w &&
+                    clickY >= btn.y && clickY <= btn.y + btn.h) {
+                    btn.pressed = 1;
+                    handlePlayerInput(btn.type);
+                    break;
+                }
+            }
+        }
+    }
+
+    function onPointerDown(e) {
+        if (e && e.preventDefault) e.preventDefault();
+        let clientX = e.clientX;
+        let clientY = e.clientY;
+        if (e.touches && e.touches.length > 0) {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+        }
+        handleTap(clientX, clientY);
+    }
+
+    container.addEventListener('pointerdown', onPointerDown, { passive: false });
+
+})();
+</script>
+
+</body>
+</html>

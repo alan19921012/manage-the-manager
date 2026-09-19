@@ -1,0 +1,1104 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Manage Your manager - Day Game Edition</title>
+    <!-- 💡 引入 Google Fonts 可愛像素字型 Press Start 2P -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        /* 💡 載入本地 fonts 資料夾內的「縫合像素繁體-12px-比例.ttf」 */
+        @font-face {
+            font-family: 'StitchPixelFont';
+            src: url('./fonts/縫合像素繁體-12px-比例.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+        }
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        body {
+            background-color: #050505;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        #gameContainer {
+            position: relative;
+            width: 96vw;
+            height: 72vw;
+            max-width: 800px;
+            max-height: 600px;
+            background-color: #000;
+            box-shadow: 0 0 35px rgba(0,0,0,0.95);
+            overflow: hidden;
+            touch-action: none;
+        }
+        #gameCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="gameCanvas"></canvas>
+</div>
+
+<script>
+function initGame() {
+    const canvas = document.getElementById('gameCanvas');
+    const container = document.getElementById('gameContainer');
+
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    ctx.imageSmoothingEnabled = false;
+
+    const GAME_WIDTH = 800;
+    const GAME_HEIGHT = 600;
+    canvas.width = GAME_WIDTH;
+    canvas.height = GAME_HEIGHT;
+
+    const totalFrames = 11;
+    const cafeFrames = new Array(totalFrames);
+
+    for (let i = 1; i <= totalFrames; i++) {
+        const img = new Image();
+        const frameIdx = i - 1;
+        const sources = [
+            `images/cafe_${i}.jpg`,
+            `./images/cafe_${i}.jpg`,
+            `cafe_${i}.jpg`
+        ];
+        let srcIdx = 0;
+
+        img.onload = () => {
+            img.isReady = true;
+        };
+        img.onerror = () => {
+            srcIdx++;
+            if (srcIdx < sources.length) {
+                img.src = sources[srcIdx];
+            }
+        };
+        img.src = sources[0];
+        cafeFrames[frameIdx] = img;
+    }
+
+    // 💡 倒數計時相關變數（對齊 gao_game / candy_game）
+    let gameStarted = false;
+    let isCountingDown = true;
+    let countdownStep = -1;
+    let countdownTimer = 0;
+
+    let gameOver = false;
+    let gameOverLockTimer = 0;
+
+    let gameState = 'IDLE'; 
+    let creamLevel = 0;
+    let fillSpeed = 0;
+    let coffeeCount = 0; 
+
+    let zoneGoodMin = 45;
+    let zonePerfectMin = 58;
+    let zonePerfectMax = 67;
+    let zoneGoodMax = 80;
+
+    let isGoldenHealZone = false; 
+
+    let comboCount = 0;
+    const FEVER_REQ_COMBO = 6;
+    let isFever = false;
+    let feverTimer = 0;
+    const MAX_FEVER_TIME = 7.0;
+    let feverHitShake = 0; 
+    let feverCooldownTimer = 0; 
+
+    let score = 0;
+    let lives = 3;
+    const maxLives = 3;
+
+    let particles = [];
+    let floatingTexts = [];
+    let pixelSparkles = [];
+    let shockwaves = [];
+    let resultTimer = 0;
+
+    let audioCtx = null;
+    let lastTime = Date.now();
+
+    // 💡 獨立模式 AudioContext + 事件解鎖機制
+    function initAudioContext() {
+        try {
+            if (!audioCtx) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (AudioContextClass) audioCtx = new AudioContextClass();
+            }
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        } catch(e) {}
+    }
+
+    // 💡 監聽來自父頁面的解鎖訊號
+    window.addEventListener('message', (e) => {
+        if (e.data === 'UNLOCK_AUDIO' || (e.data && e.data.action === 'UNLOCK_AUDIO')) {
+            initAudioContext();
+        }
+    });
+
+    window.addEventListener('pointerdown', initAudioContext, { passive: true });
+    window.addEventListener('touchstart', initAudioContext, { passive: true });
+
+    function randomizeTargetZone() {
+        const center = Math.floor(Math.random() * 16) + 55;
+        let perfectHalfWidth = 5; 
+        let goodExtend = 8;       
+
+        if (coffeeCount >= 6) {
+            const shrinkRatio = 1 - (Math.random() * 0.2 + 0.2);
+            perfectHalfWidth *= shrinkRatio;
+            goodExtend *= shrinkRatio;
+        }
+
+        zonePerfectMin = Math.max(50, center - perfectHalfWidth);
+        zonePerfectMax = Math.min(75, center + perfectHalfWidth);
+        zoneGoodMin = Math.max(45, zonePerfectMin - goodExtend);
+        zoneGoodMax = Math.min(80, zonePerfectMax + goodExtend);
+
+        isGoldenHealZone = Math.random() < 0.17;
+    }
+
+    function playSound(type) {
+        try {
+            initAudioContext();
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+
+            if (type === 'start') {
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(330, now);
+                gain.gain.setValueAtTime(0.15, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.1);
+                osc.start(now);
+                osc.stop(now + 0.1);
+            } else if (type === 'perfect') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(523.25, now);
+                osc.frequency.setValueAtTime(659.25, now + 0.08);
+                osc.frequency.setValueAtTime(783.99, now + 0.16);
+                gain.gain.setValueAtTime(0.2, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.35);
+                osc.start(now);
+                osc.stop(now + 0.35);
+            } else if (type === 'heal' || type === 'fever') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(523, now);
+                osc.frequency.setValueAtTime(659, now + 0.08);
+                osc.frequency.setValueAtTime(880, now + 0.16);
+                gain.gain.setValueAtTime(0.3, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.4);
+                osc.start(now);
+                osc.stop(now + 0.4);
+            } else if (type === 'good') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(440, now);
+                osc.frequency.setValueAtTime(554.37, now + 0.1);
+                gain.gain.setValueAtTime(0.15, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.25);
+                osc.start(now);
+                osc.stop(now + 0.25);
+            } else if (type === 'fail') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(160, now);
+                osc.frequency.linearRampToValueAtTime(60, now + 0.25);
+                gain.gain.setValueAtTime(0.3, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.25);
+                osc.start(now);
+                osc.stop(now + 0.25);
+            } else if (type === 'pop') {
+                osc.type = 'square';
+                const pitch = 500 + Math.random() * 250;
+                osc.frequency.setValueAtTime(pitch, now);
+                osc.frequency.exponentialRampToValueAtTime(pitch * 1.8, now + 0.08);
+                gain.gain.setValueAtTime(0.25, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.08);
+                osc.start(now);
+                osc.stop(now + 0.08);
+            } else if (type === 'beep') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(440, now);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+                osc.start(now);
+                osc.stop(now + 0.15);
+            } else if (type === 'beep_final') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(880, now);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                osc.start(now);
+                osc.stop(now + 0.3);
+            }
+        } catch(e) {}
+    }
+
+    function drawFilmGrain() {
+        ctx.save();
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.025)';
+        for (let i = 0; i < 180; i++) {
+            const gx = Math.random() * GAME_WIDTH;
+            const gy = Math.random() * GAME_HEIGHT;
+            ctx.fillRect(gx, gy, 2, 2);
+        }
+        ctx.restore();
+    }
+
+    function drawPixelBox(x, y, w, h, bgColor, borderColor, shadowColor = '#000000', pixelSize = 4) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = shadowColor;
+        ctx.fillRect(x + pixelSize, y + pixelSize, w, h);
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = borderColor;
+        ctx.fillRect(x, y, w, pixelSize); 
+        ctx.fillRect(x, y + h - pixelSize, w, pixelSize); 
+        ctx.fillRect(x, y, pixelSize, h); 
+        ctx.fillRect(x + w - pixelSize, y, pixelSize, h); 
+        ctx.restore();
+    }
+
+    function drawPixelText(text, x, y, color = '#ffffff', fontSize = 18, align = 'center', useOnlyStitchFont = false) {
+        ctx.save();
+        if (useOnlyStitchFont) {
+            ctx.font = `${fontSize}px "StitchPixelFont", monospace`;
+        } else {
+            ctx.font = `${fontSize}px "Press Start 2P", "StitchPixelFont", monospace`;
+        }
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        
+        ctx.fillStyle = '#000000';
+        const offsets = [[-2,0], [2,0], [0,-2], [0,2], [-2,-2], [2,-2], [-2,2], [2,2]];
+        for (let [ox, oy] of offsets) {
+            ctx.fillText(text, x + ox, y + oy);
+        }
+        
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
+    function drawPixelTomatoIcon(cx, cy, scale = 1.0) {
+        ctx.save();
+        ctx.translate(Math.round(cx), Math.round(cy));
+        ctx.scale(scale, scale);
+
+        let mainColor = '#d50000';
+        let highlightColor = '#ff8a80';
+        let stemColor = '#1b5e20';
+
+        ctx.fillStyle = stemColor;
+        ctx.fillRect(-6, -22, 12, 6);
+        ctx.fillRect(-3, -25, 6, 4);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        ctx.fillStyle = highlightColor;
+        ctx.fillRect(-12, -12, 8, 8);
+        ctx.restore();
+    }
+
+    function drawClassicTomato(x, y, type = 'tomato', targetSize = 44) {
+        ctx.save();
+        ctx.imageSmoothingEnabled = false;
+        const scale = (targetSize / 42) * 1.165;
+
+        ctx.translate(Math.round(x), Math.round(y));
+        ctx.scale(scale, scale);
+
+        let mainColor = '#d50000';
+        let highlightColor = '#ff8a80';
+        let stemColor = '#1b5e20';
+
+        ctx.fillStyle = stemColor;
+        ctx.fillRect(-6, -22, 12, 6);
+        ctx.fillRect(-3, -25, 6, 4);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        ctx.fillStyle = highlightColor;
+        ctx.fillRect(-12, -12, 8, 8);
+
+        ctx.restore();
+    }
+
+    function drawPixelSparkle(cx, cy, scale = 3, color = '#ffeb3b') {
+        ctx.save();
+        ctx.fillStyle = color;
+        const sparkMap = [
+            [0,0,1,0,0],
+            [0,1,1,1,0],
+            [1,1,1,1,1],
+            [0,1,1,1,0],
+            [0,0,1,0,0]
+        ];
+        for (let r = 0; r < 5; r++) {
+            for (let c = 0; c < 5; c++) {
+                if (sparkMap[r][c] === 1) {
+                    ctx.fillRect(cx + (c - 2) * scale, cy + (r - 2) * scale, scale, scale);
+                }
+            }
+        }
+        ctx.restore();
+    }
+
+    class PixelSparkleParticle {
+        constructor(x, y) {
+            this.x = x + (Math.random() - 0.5) * 150;
+            this.y = y + (Math.random() - 0.5) * 40;
+            this.scale = Math.floor(Math.random() * 2) + 3;
+            this.life = 35;
+            this.color = '#ffeb3b';
+            this.vy = -2 - Math.random() * 2;
+        }
+        update() {
+            this.y += this.vy;
+            this.life--;
+        }
+        draw() {
+            if (this.life <= 0) return;
+            drawPixelSparkle(this.x, this.y, this.scale, this.color);
+        }
+    }
+
+    class CreamExplosionParticle {
+        constructor(x, y) {
+            this.x = x + (Math.random() - 0.5) * 140;
+            this.y = y;
+            this.vx = (Math.random() - 0.5) * 20;
+            this.vy = -12 - Math.random() * 10; 
+            this.gravity = 0.5;
+            this.size = Math.floor(Math.random() * 8) + 16; 
+            this.color = '#ffffff';
+            this.life = 50;
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += this.gravity;
+            this.life--;
+        }
+        draw() {
+            if (this.life <= 0) return;
+            ctx.save();
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(Math.floor(this.x) - 3, Math.floor(this.y) - 3, this.size + 6, this.size + 6);
+            ctx.fillStyle = this.color;
+            ctx.fillRect(Math.floor(this.x), Math.floor(this.y), this.size, this.size);
+            ctx.restore();
+        }
+    }
+
+    class Shockwave {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.radius = 12;
+            this.maxRadius = 100;
+            this.opacity = 1.0;
+        }
+        update() {
+            this.radius += 8;
+            this.opacity -= 0.08;
+        }
+        draw() {
+            if (this.opacity <= 0) return;
+            ctx.save();
+            ctx.strokeStyle = `rgba(255, 235, 59, ${this.opacity})`;
+            ctx.lineWidth = 6;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    class FloatingText {
+        constructor(text, x = GAME_WIDTH / 2, y = 250, color = '#ffffff', fontSize = 20) {
+            this.text = text;
+            this.color = color;
+            this.x = x;
+            this.y = y;
+            this.fontSize = fontSize;
+            this.opacity = 1.0;
+            this.life = 150; 
+        }
+        update() {
+            this.y -= 1.0; 
+            this.life--;
+            if (this.life < 40) {
+                this.opacity -= 0.025; 
+            }
+        }
+        draw() {
+            if (this.life <= 0 || this.opacity <= 0) return;
+            drawPixelText(this.text, this.x, this.y, this.color, this.fontSize, 'center');
+        }
+    }
+
+    const actionBtn = { x: 620, y: 440, size: 126 };
+
+    function drawBackgroundAndScene() {
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        let shakeOffsetX = 0;
+        let shakeOffsetY = 0;
+        if (feverHitShake > 0) {
+            shakeOffsetX = (Math.random() - 0.5) * 16;
+            shakeOffsetY = (Math.random() - 0.5) * 16;
+            feverHitShake--;
+        }
+
+        ctx.translate(shakeOffsetX, shakeOffsetY);
+
+        let frameIndex = isFever ? (Math.floor(Date.now() / 60) % totalFrames) : Math.floor((creamLevel / 100) * (totalFrames - 1));
+        frameIndex = Math.max(0, Math.min(totalFrames - 1, frameIndex));
+
+        let targetImg = cafeFrames[frameIndex];
+        if (!targetImg || (!targetImg.isReady && !(targetImg.complete && targetImg.naturalWidth !== 0))) {
+            for (let k = 0; k < totalFrames; k++) {
+                if (cafeFrames[k] && (cafeFrames[k].isReady || (cafeFrames[k].complete && cafeFrames[k].naturalWidth !== 0))) {
+                    targetImg = cafeFrames[k];
+                    break;
+                }
+            }
+        }
+
+        if (targetImg && (targetImg.isReady || (targetImg.complete && targetImg.naturalWidth !== 0))) {
+            const imgRatio = targetImg.width / targetImg.height;
+            const drawH = GAME_HEIGHT;
+            const drawW = drawH * imgRatio;
+            const drawX = (GAME_WIDTH - drawW) / 2;
+            ctx.drawImage(targetImg, drawX, 0, drawW, drawH);
+        } else {
+            ctx.fillStyle = '#221133';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+        }
+        ctx.restore();
+
+        if (gameState === 'RESULT' && creamLevel > zoneGoodMax && !isFever) {
+            ctx.fillStyle = 'rgba(255, 0, 0, 0.25)';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+        }
+
+        drawFilmGrain();
+    }
+
+    // 💡 倒數處理
+    function handleCountdown(delta) {
+        if (!isCountingDown) return;
+
+        countdownTimer += delta;
+
+        const steps = [
+            { text: '3', color: '#ffffff', sound: 'beep' },
+            { text: '2', color: '#ffea00', sound: 'beep' },
+            { text: '1', color: '#ff9800', sound: 'beep' },
+            { text: 'START!', color: '#ff1744', sound: 'beep_final' }
+        ];
+
+        const stepInterval = 0.85;
+        const currentIdx = Math.floor(countdownTimer / stepInterval);
+
+        if (currentIdx !== countdownStep && currentIdx < steps.length) {
+            countdownStep = currentIdx;
+            playSound(steps[countdownStep].sound);
+        }
+
+        if (currentIdx >= steps.length) {
+            isCountingDown = false;
+            gameStarted = true;
+            return;
+        }
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+        ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+        ctx.lineWidth = 2;
+        const lineSpacing = 10;
+
+        for (let x = -GAME_HEIGHT; x < GAME_WIDTH + GAME_HEIGHT; x += lineSpacing) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x + GAME_HEIGHT, GAME_HEIGHT);
+            ctx.stroke();
+        }
+
+        for (let x = GAME_WIDTH + GAME_HEIGHT; x > -GAME_HEIGHT; x -= lineSpacing * 1.5) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x - GAME_HEIGHT, GAME_HEIGHT);
+            ctx.stroke();
+        }
+
+        const step = steps[countdownStep] || steps[0];
+        const progressInStep = (countdownTimer % stepInterval) / stepInterval;
+        const scale = 1.0 + Math.sin(progressInStep * Math.PI) * 0.35; 
+
+        ctx.translate(GAME_WIDTH / 2, GAME_HEIGHT / 2);
+        ctx.scale(scale, scale);
+        drawPixelText(step.text, 0, 0, step.color, 76, 'center');
+        ctx.restore();
+    }
+
+    function drawUI() {
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-over';
+
+        let uiShakeX = 0;
+        let uiShakeY = 0;
+        if (isFever && feverHitShake > 0) {
+            uiShakeX = (Math.random() - 0.5) * 16;
+            uiShakeY = (Math.random() - 0.5) * 16;
+            ctx.translate(uiShakeX, uiShakeY);
+        }
+
+        // 1. 左上角分數底框
+        drawPixelBox(20, 20, 240, 50, '#111111', '#ffffff', '#000000', 4);
+        drawPixelText(`SCORE:${score}`, 140, 47, '#ffffff', 14, 'center');
+
+        // 2. 右上角血量底框
+        let heartsStr = '';
+        for (let i = 0; i < maxLives; i++) heartsStr += (i < lives) ? '❤️' : '🖤';
+        const hpColor = lives <= 1 ? '#ff1744' : '#ffeb3b';
+        drawPixelBox(GAME_WIDTH - 260, 20, 240, 50, '#111111', hpColor, '#000000', 4);
+        drawPixelText(`HP:${heartsStr}`, GAME_WIDTH - 140, 47, hpColor, 14, 'center');
+
+        // 3. 中間圓角扁平化 Fever Mode 進度條
+        const fBarX = 280;
+        const fBarY = 32;
+        const fBarW = 240;
+        const fBarH = 22;
+        const radius = 11;
+
+        let fBorderColor = '#555555';
+        let fFillRatio = 0;
+
+        if (isFever) {
+            const flashTick = Math.floor(Date.now() / 60) % 3;
+            fBorderColor = flashTick === 0 ? '#ffea00' : (flashTick === 1 ? '#ff1744' : '#ffffff');
+            fFillRatio = Math.max(0, feverTimer / MAX_FEVER_TIME);
+        } else {
+            fFillRatio = Math.min(1.0, comboCount / FEVER_REQ_COMBO);
+            fBorderColor = fFillRatio >= 1.0 ? '#ff1744' : '#555555';
+        }
+
+        function drawRoundedBarPath(x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.arc(x + r, y + r, r, Math.PI * 0.5, Math.PI * 1.5);
+            ctx.lineTo(x + w - r, y);
+            ctx.arc(x + w - r, y + r, r, Math.PI * 1.5, Math.PI * 0.5);
+            ctx.lineTo(x + r, y + h);
+            ctx.closePath();
+        }
+
+        ctx.save();
+        ctx.fillStyle = '#000000';
+        drawRoundedBarPath(fBarX + 3, fBarY + 3, fBarW, fBarH, radius);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
+        drawRoundedBarPath(fBarX, fBarY, fBarW, fBarH, radius);
+        ctx.fill();
+
+        ctx.strokeStyle = fBorderColor;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        if (fFillRatio > 0) {
+            ctx.save();
+            drawRoundedBarPath(fBarX, fBarY, fBarW, fBarH, radius);
+            ctx.clip();
+
+            const fillW = fBarW * fFillRatio;
+            const cycle = (Date.now() % 3000) / 3000;
+            const shift = (Math.sin(cycle * Math.PI * 2) + 1) / 2;
+
+            const grad = ctx.createLinearGradient(fBarX, fBarY, fBarX + fBarW, fBarY);
+            if (shift < 0.5) {
+                grad.addColorStop(0, '#ff1744');
+                grad.addColorStop(0.5 + shift, '#ffea00');
+                grad.addColorStop(1, '#ff1744');
+            } else {
+                grad.addColorStop(0, '#ffea00');
+                grad.addColorStop(shift - 0.5, '#ff1744');
+                grad.addColorStop(1, '#ffea00');
+            }
+
+            ctx.fillStyle = grad;
+            ctx.fillRect(fBarX, fBarY, fillW, fBarH);
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.fillRect(fBarX, fBarY, fillW, 3);
+            ctx.restore();
+        }
+
+        drawClassicTomato(fBarX + fBarW / 2, fBarY + fBarH / 2, 'tomato', 44);
+        ctx.restore();
+
+        if (isFever) {
+            drawPixelText("🔥BREAK THE RULES!!🔥", GAME_WIDTH / 2, fBarY - 14, '#ffea00', 12, 'center');
+        }
+
+        // 4. 奶油量表 (Cream Gauge)
+        const tx = 50;
+        const ty = 180;
+        const tw = 36;
+        const th = 260;
+        const pSize = 4;
+
+        drawPixelBox(tx, ty, tw, th, '#111111', '#ffffff', '#000000', pSize);
+
+        if (isFever) {
+            ctx.fillStyle = '#ffea00';
+            ctx.fillRect(tx + pSize, ty + pSize, tw - pSize * 2, th - pSize * 2);
+        } else {
+            const currentHeight = Math.floor((th - pSize * 2) * (creamLevel / 100));
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(tx + pSize, ty + th - pSize - currentHeight, tw - pSize * 2, currentHeight);
+
+            const g1Top = ty + pSize + Math.floor((th - pSize * 2) * (1 - zonePerfectMin / 100));
+            const g1Height = Math.floor((th - pSize * 2) * ((zonePerfectMin - zoneGoodMin) / 100));
+            ctx.fillStyle = 'rgba(139, 195, 74, 0.65)';
+            ctx.fillRect(tx + pSize, g1Top, tw - pSize * 2, g1Height);
+
+            const pTop = ty + pSize + Math.floor((th - pSize * 2) * (1 - zonePerfectMax / 100));
+            const pHeight = Math.floor((th - pSize * 2) * ((zonePerfectMax - zonePerfectMin) / 100));
+            
+            ctx.fillStyle = isGoldenHealZone ? '#ffd600' : 'rgba(0, 230, 118, 0.85)';
+            ctx.fillRect(tx + pSize, pTop, tw - pSize * 2, pHeight);
+
+            const g2Top = ty + pSize + Math.floor((th - pSize * 2) * (1 - zoneGoodMax / 100));
+            const g2Height = Math.floor((th - pSize * 2) * ((zoneGoodMax - zonePerfectMax) / 100));
+            ctx.fillStyle = 'rgba(139, 195, 74, 0.65)';
+            ctx.fillRect(tx + pSize, g2Top, tw - pSize * 2, g2Height);
+
+            ctx.fillStyle = isGoldenHealZone ? '#ffea00' : '#76ff03';
+            ctx.fillRect(tx - 6, g2Top, tw + 12, pSize);
+            ctx.fillRect(tx - 6, g1Top + g1Height - pSize, tw + 12, pSize);
+        }
+
+        drawPixelText('CREAM', tx + tw / 2, ty - 12, '#ffffff', 14, 'center');
+
+        // 5. 黃金太陽像素按鈕 (126x126px)
+        if (!gameOver) {
+            const bx = actionBtn.x;
+            const by = actionBtn.y;
+            const bsz = actionBtn.size;
+            const ps = 6; 
+
+            ctx.save();
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(bx + ps * 2, by + ps * 2, bsz, bsz);
+
+            ctx.fillStyle = '#ffb300';
+            ctx.fillRect(bx + ps, by, bsz - ps * 2, bsz);
+            ctx.fillRect(bx, by + ps, bsz, bsz - ps * 2);
+
+            ctx.fillStyle = '#ff8f00';
+            ctx.fillRect(bx + ps, by, bsz - ps * 2, ps); 
+            ctx.fillRect(bx, by + ps, ps, bsz - ps * 2); 
+            ctx.fillStyle = '#ffe57f';
+            ctx.fillRect(bx + ps, by + bsz - ps, bsz - ps * 2, ps); 
+            ctx.fillRect(bx + bsz - ps, by + ps, ps, bsz - ps * 2); 
+
+            const inX = bx + ps * 3;
+            const inY = by + ps * 3;
+            const inSz = bsz - ps * 6;
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(inX + ps, inY, inSz - ps * 2, inSz);
+            ctx.fillRect(inX, inY + ps, inSz, inSz - ps * 2);
+
+            ctx.fillStyle = '#d0d0d0';
+            ctx.fillRect(inX + ps, inY + inSz - ps, inSz - ps * 2, ps);
+            ctx.fillRect(inX + inSz - ps, inY + ps, ps, inSz - ps * 2);
+
+            const sunX = bx + bsz / 2;
+            const sunY = by + bsz / 2;
+
+            ctx.fillStyle = '#ffca28';
+            const rayDist = 26;
+            for (let i = 0; i < 8; i++) {
+                const angle = (i * Math.PI) / 4;
+                const rx = Math.round(sunX + Math.cos(angle) * rayDist);
+                const ry = Math.round(sunY + Math.sin(angle) * rayDist);
+                ctx.fillRect(rx - 6, ry - 6, 12, 12);
+            }
+
+            ctx.fillStyle = '#ff8f00';
+            ctx.fillRect(sunX - 18, sunY - 21, 36, 42);
+            ctx.fillRect(sunX - 21, sunY - 18, 42, 36);
+
+            ctx.fillStyle = '#ffca28';
+            ctx.fillRect(sunX - 15, sunY - 18, 30, 36);
+            ctx.fillRect(sunX - 18, sunY - 15, 36, 30);
+
+            ctx.fillStyle = '#ffee58';
+            ctx.fillRect(sunX - 12, sunY - 15, 18, 18);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(sunX - 9, sunY - 15, 9, 9);
+
+            ctx.restore();
+        }
+
+        ctx.restore(); 
+
+        // 6. 完全對齊 gao_game / candy_game 結算 UI
+        if (gameOver) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.90)';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+            drawPixelBox(100, 70, 600, 460, '#111111', '#ff1744', '#000000', 6);
+            drawPixelText('GAME OVER', GAME_WIDTH / 2, 130, '#ff1744', 28, 'center');
+            drawPixelText(`FINAL SCORE: ${score}`, GAME_WIDTH / 2, 190, '#ffeb3b', 16, 'center');
+
+            if (gameOverLockTimer > 0) {
+                drawPixelText(`PLEASE WAIT...`, GAME_WIDTH / 2, 280, '#888888', 14, 'center');
+            } else {
+                // 1. CONTINUE? 按鈕
+                drawPixelBox(180, 260, 440, 50, '#d50000', '#ffea00', '#000000', 4);
+                drawPixelText('CONTINUE?', GAME_WIDTH / 2, 285, '#ffffff', 14, 'center');
+
+                // 2. GONNA STOP? 按鈕
+                drawPixelBox(180, 330, 440, 50, '#333333', '#ffffff', '#000000', 4);
+                drawPixelText('GONNA STOP?', GAME_WIDTH / 2, 355, '#ff4081', 14, 'center');
+
+                // 3. 按此觀看COLLAR《管理還管你》MV 按鈕
+                const mvBtnX = 155;
+                const mvBtnY = 430;
+                const mvBtnW = 490;
+                const mvBtnH = 70;
+                drawPixelBox(mvBtnX, mvBtnY, mvBtnW, mvBtnH, '#ffffff', '#C1001B', '#000000', 4);
+                
+                drawPixelTomatoIcon(mvBtnX + 28, mvBtnY + mvBtnH / 2, 1.0);
+                drawPixelText('按此觀看COLLAR《管理還管你》MV', GAME_WIDTH / 2, mvBtnY + mvBtnH / 2, '#ffffff', 21, 'center', true);
+                drawPixelTomatoIcon(mvBtnX + mvBtnW - 28, mvBtnY + mvBtnH / 2, 1.0);
+            }
+        }
+    }
+
+    function resetGame() {
+        score = 0;
+        lives = 3;
+        coffeeCount = 0;
+        creamLevel = 0;
+        comboCount = 0;
+        isFever = false;
+        feverCooldownTimer = 0;
+        gameState = 'IDLE';
+        gameOver = false;
+        gameOverLockTimer = 0;
+        pixelSparkles = [];
+        floatingTexts = [];
+        particles = [];
+        shockwaves = [];
+
+        // 💡 重新倒數
+        gameStarted = false;
+        isCountingDown = true;
+        countdownStep = -1;
+        countdownTimer = 0;
+    }
+
+    function checkResult() {
+        gameState = 'RESULT';
+        resultTimer = 90;
+
+        if (creamLevel >= zonePerfectMin && creamLevel <= zonePerfectMax) {
+            score += 700;
+            comboCount++;
+
+            if (isGoldenHealZone) {
+                if (lives < maxLives) lives++;
+                playSound('heal');
+                floatingTexts.push(new FloatingText("HEAL! +1 ❤️", GAME_WIDTH / 2, 250, '#ff4081', 18));
+            } else {
+                playSound('perfect');
+                floatingTexts.push(new FloatingText("PERFECT! +700", GAME_WIDTH / 2, 250, '#00e676', 18));
+            }
+        } else if ((creamLevel >= zoneGoodMin && creamLevel < zonePerfectMin) || 
+                   (creamLevel > zonePerfectMax && creamLevel <= zoneGoodMax)) {
+            score += 350;
+            comboCount++;
+            playSound('good');
+            floatingTexts.push(new FloatingText("GOOD! +350", GAME_WIDTH / 2, 250, '#ffeb3b', 18));
+        } else {
+            lives--;
+            comboCount = 0; 
+            playSound('fail');
+
+            if (creamLevel < zoneGoodMin) {
+                floatingTexts.push(new FloatingText("TOO LITTLE! -1 ❤️", GAME_WIDTH / 2, 250, '#ff1744', 18));
+            } else {
+                floatingTexts.push(new FloatingText("OVERFLOW! -1 ❤️", GAME_WIDTH / 2, 250, '#ff1744', 18));
+            }
+
+            if (lives <= 0) {
+                lives = 0;
+                gameOver = true;
+                gameOverLockTimer = 0.5;
+                return;
+            }
+        }
+
+        if (comboCount >= FEVER_REQ_COMBO) {
+            isFever = true;
+            feverTimer = MAX_FEVER_TIME;
+            comboCount = 0;
+            gameState = 'IDLE';
+            playSound('fever');
+        }
+    }
+
+    function gameLoop() {
+        const now = Date.now();
+        const delta = Math.min((now - lastTime) / 1000, 0.1);
+        lastTime = now;
+
+        ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        drawBackgroundAndScene();
+
+        if (gameStarted && !gameOver) {
+            if (feverCooldownTimer > 0) {
+                feverCooldownTimer = Math.max(0, feverCooldownTimer - delta);
+            }
+
+            if (isFever) {
+                feverTimer -= delta;
+
+                if (feverTimer <= 0) {
+                    isFever = false;
+                    feverTimer = 0;
+                    feverCooldownTimer = 1.5; 
+                    gameState = 'IDLE';
+                    creamLevel = 0;
+                }
+            } else if (gameState === 'FILLING') {
+                creamLevel += fillSpeed;
+
+                if (creamLevel >= 100) {
+                    creamLevel = 100;
+                    checkResult();
+                }
+            } else if (gameState === 'RESULT') {
+                resultTimer--;
+                if (resultTimer <= 0) {
+                    gameState = 'IDLE';
+                    creamLevel = 0;
+                }
+            }
+        }
+
+        if (gameOver && gameOverLockTimer > 0) {
+            gameOverLockTimer = Math.max(0, gameOverLockTimer - delta);
+        }
+
+        for (let i = shockwaves.length - 1; i >= 0; i--) {
+            let sw = shockwaves[i];
+            sw.update();
+            sw.draw();
+            if (sw.opacity <= 0) shockwaves.splice(i, 1);
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.update();
+            p.draw();
+            if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        for (let i = pixelSparkles.length - 1; i >= 0; i--) {
+            let sp = pixelSparkles[i];
+            sp.update();
+            sp.draw();
+            if (sp.life <= 0) pixelSparkles.splice(i, 1);
+        }
+
+        for (let i = floatingTexts.length - 1; i >= 0; i--) {
+            let ft = floatingTexts[i];
+            ft.update();
+            ft.draw();
+            if (ft.opacity <= 0) floatingTexts.splice(i, 1);
+        }
+
+        drawUI();
+
+        if (isCountingDown) {
+            handleCountdown(delta);
+        }
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    function handleInput(e) {
+        if (e) e.preventDefault();
+        
+        initAudioContext();
+
+        if (isCountingDown) return;
+
+        let clientX, clientY;
+        if (e.touches && e.touches.length > 0) {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+        } else if (e.clientX !== undefined) {
+            clientX = e.clientX;
+            clientY = e.clientY;
+        }
+
+        if (clientX !== undefined && clientY !== undefined) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = GAME_WIDTH / rect.width;
+            const scaleY = GAME_HEIGHT / rect.height;
+            const canvasX = (clientX - rect.left) * scaleX;
+            const canvasY = (clientY - rect.top) * scaleY;
+
+            // 💡 結算點擊邏輯 (升級 GONNA STOP? 多重備援機制)
+            if (gameOver && gameOverLockTimer <= 0) {
+                // 1. CONTINUE? 按鈕 (X: 180~620, Y: 260~310)
+                if (canvasX >= 180 && canvasX <= 620 && canvasY >= 260 && canvasY <= 310) {
+                    resetGame();
+                    return;
+                }
+                // 2. GONNA STOP? 按鈕 (X: 180~620, Y: 330~380)
+                if (canvasX >= 180 && canvasX <= 620 && canvasY >= 330 && canvasY <= 380) {
+                    try {
+                        // 💡 第一優先：最外層視窗 F5 刷新
+                        if (window.top && window.top !== window) {
+                            window.top.location.reload();
+                        } else {
+                            window.location.reload();
+                        }
+                    } catch (err) {
+                        // 💡 第二備援：發送 postMessage 給父頁面
+                        if (window.parent) {
+                            window.parent.postMessage({ action: 'RELOAD_GAME' }, '*');
+                        } else {
+                            window.location.reload();
+                        }
+                    }
+                    return;
+                }
+                // 3. COLLAR MV 按鈕 (X: 155~645, Y: 430~500)
+                if (canvasX >= 155 && canvasX <= 645 && canvasY >= 430 && canvasY <= 500) {
+                    window.open('https://youtu.be/4DObQP77xAs?si=lQ__OsG39YGlsKWd', '_blank');
+                    return;
+                }
+                return;
+            }
+
+            const isInsideButton = (
+                canvasX >= actionBtn.x &&
+                canvasX <= actionBtn.x + actionBtn.size &&
+                canvasY >= actionBtn.y &&
+                canvasY <= actionBtn.y + actionBtn.size
+            );
+
+            if (!isFever) {
+                if (gameState === 'IDLE' && !isInsideButton) return;
+                if (gameState === 'FILLING' && !isInsideButton) return; 
+            }
+        }
+
+        if (feverCooldownTimer > 0) return;
+
+        if (isFever) {
+            score += 175;
+            coffeeCount++;
+            feverHitShake = 12;
+            playSound('pop');
+
+            const cupX = 280; 
+            const cupY = 380;
+            const starY = 350; 
+
+            shockwaves.push(new Shockwave(actionBtn.x + actionBtn.size / 2, actionBtn.y + actionBtn.size / 2));
+
+            for (let k = 0; k < 20; k++) {
+                particles.push(new CreamExplosionParticle(cupX, cupY));
+            }
+            for (let k = 0; k < 8; k++) {
+                pixelSparkles.push(new PixelSparkleParticle(cupX, starY));
+            }
+            return;
+        }
+
+        if (gameState === 'IDLE') {
+            gameState = 'FILLING';
+            coffeeCount++;
+            creamLevel = 0;
+
+            randomizeTargetZone();
+
+            fillSpeed = (Math.random() * 0.4 + 0.7) * 0.9; 
+
+            playSound('start');
+        } else if (gameState === 'FILLING') {
+            checkResult();
+        }
+    }
+
+    container.addEventListener('pointerdown', handleInput);
+    requestAnimationFrame(gameLoop);
+}
+
+if (document.readyState === 'interactive' || document.readyState === 'complete') {
+    initGame();
+} else {
+    document.addEventListener('DOMContentLoaded', initGame);
+}
+</script>
+
+</body>
+</html>

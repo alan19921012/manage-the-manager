@@ -1,0 +1,1134 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Sumling Game - Tomato Rhythm Edition</title>
+    <!-- 💡 引入 Google Fonts 可愛像素字型 Press Start 2P -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        /* 💡 載入本地 fonts 資料夾內的「縫合像素繁體-12px-比例.ttf」 */
+        @font-face {
+            font-family: 'StitchPixelFont';
+            src: url('./fonts/縫合像素繁體-12px-比例.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+        }
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        body {
+            background-color: #050505;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        #gameContainer {
+            position: relative;
+            width: 96vw;
+            height: 72vw;
+            max-width: 800px;
+            max-height: 600px;
+            background-color: #000;
+            box-shadow: 0 0 35px rgba(0,0,0,0.95);
+            overflow: hidden;
+            touch-action: none;
+        }
+        #gameCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="gameCanvas"></canvas>
+</div>
+
+<script>
+function initGame() {
+    const canvas = document.getElementById('gameCanvas');
+    const container = document.getElementById('gameContainer');
+
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+
+    const GAME_WIDTH = 800;
+    const GAME_HEIGHT = 600;
+    canvas.width = GAME_WIDTH;
+    canvas.height = GAME_HEIGHT;
+
+    let audioCtx = null;
+    let noiseBuffer = null;
+
+    function initAudioContext() {
+        try {
+            if (!audioCtx) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (AudioContextClass) {
+                    audioCtx = new AudioContextClass();
+
+                    const bufferSize = audioCtx.sampleRate * 0.1;
+                    noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+                    const output = noiseBuffer.getChannelData(0);
+                    for (let i = 0; i < bufferSize; i++) {
+                        output[i] = (Math.random() * 2 - 1) * 0.9;
+                    }
+                }
+            }
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        } catch(e) {}
+    }
+
+    window.addEventListener('message', (e) => {
+        if (e.data === 'UNLOCK_AUDIO' || (e.data && e.data.action === 'UNLOCK_AUDIO')) {
+            initAudioContext();
+        }
+    });
+
+    window.addEventListener('pointerdown', initAudioContext, { passive: true });
+    window.addEventListener('touchstart', initAudioContext, { passive: true });
+
+    function loadRobustImage(baseName) {
+        const img = new Image();
+        const sources = [
+            `images/${baseName}.jpg.jpg`,
+            `images/${baseName}.jpg`,
+            `./images/${baseName}.jpg`,
+            `${baseName}.jpg.jpg`,
+            `${baseName}.jpg`
+        ];
+        let srcIdx = 0;
+
+        img.onload = () => { img.isReady = true; };
+        img.onerror = () => {
+            srcIdx++;
+            if (srcIdx < sources.length) {
+                img.src = sources[srcIdx];
+            }
+        };
+        img.src = sources[0];
+        return img;
+    }
+
+    const bgImg1 = loadRobustImage('sumlingbg_1');
+    const bgImg2 = loadRobustImage('sumlingbg_2');
+    const bgImg3 = loadRobustImage('sumlingbg_3');
+
+    let currentBgImg = bgImg1;
+    let bgAnimFrameCount = 0;
+
+    let score = 0;
+    let lives = 3;
+
+    // 💡 遊戲狀態控制：SELECT_SONG (選曲) -> COUNTDOWN (倒數) -> PLAYING (遊玩) -> GAMEOVER
+    let gameState = 'SELECT_SONG'; 
+
+    let countdownStep = -1;
+    let countdownTimer = 0;
+
+    let gameOverLockTimer = 0; 
+
+    let items = [];
+    let particles = [];
+    let tomatoFountainParticles = []; 
+    let floatingTexts = [];
+
+    // 💡 可選曲目清單 (不同 BPM 與基礎速度)
+    const songList = [
+        { name: 'NORMAL SPEED', bpm: 110, baseSpeed: 440, color: '#00e676' },
+        { name: 'FAST SPEED', bpm: 130, baseSpeed: 520, color: '#ffea00' },
+        { name: 'HYPER SPEED', bpm: 150, baseSpeed: 600, color: '#ff1744' }
+    ];
+    let selectedSongIdx = 0;
+
+    let BPM = 110;
+    let BEAT_INTERVAL = (60 / BPM) * 1000;
+    let baseMovementSpeed = 440;
+
+    let lastSpawnTime = 0;
+    let currentBeatPatternIndex = 0;
+
+    let isRushMode = false;
+    let rushCount = 0;
+    let nextRushTriggerScore = 2000;
+
+    let isFever = false;
+    let feverTimer = 0;
+    const MAX_FEVER_TIME = 6.0;
+    let feverScoreThreshold = 8000; 
+    let isWaitingClear = false; 
+    let delaySpawnTimer = 0; 
+    let screenShakeTimer = 0;
+
+    const normalBeatPattern = [1, 1, 0.5, 0.5, 1, 1, 0.5, 0.5];
+
+    const TARGET_CENTER_X = 400;
+    const TARGET_Y = 410;
+    const PERFECT_RANGE = 28;
+    const GOOD_RANGE = 60;
+
+    function getAccurateTime() {
+        return (audioCtx && audioCtx.state === 'running') ? audioCtx.currentTime * 1000 : performance.now();
+    }
+
+    function playBeepSound(type) {
+        try {
+            initAudioContext();
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            if (type === 'beep') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(440, now);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+                osc.start(now);
+                osc.stop(now + 0.15);
+            } else if (type === 'beep_final') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(880, now);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                osc.start(now);
+                osc.stop(now + 0.3);
+            }
+        } catch(e) {}
+    }
+
+    function playPulseKick() {
+        try {
+            initAudioContext();
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(280, now);
+            osc.frequency.exponentialRampToValueAtTime(40, now + 0.11);
+
+            gain.gain.setValueAtTime(0.9, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start(now);
+            osc.stop(now + 0.11);
+
+            const subOsc = audioCtx.createOscillator();
+            const subGain = audioCtx.createGain();
+
+            subOsc.type = 'triangle';
+            subOsc.frequency.setValueAtTime(200, now);
+            subOsc.frequency.exponentialRampToValueAtTime(35, now + 0.13);
+
+            subGain.gain.setValueAtTime(0.9, now);
+            subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+
+            subOsc.connect(subGain);
+            subGain.connect(audioCtx.destination);
+
+            subOsc.start(now);
+            subOsc.stop(now + 0.13);
+        } catch(e) {}
+    }
+
+    function playSlapNoise() {
+        try {
+            initAudioContext();
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+
+            const osc = audioCtx.createOscillator();
+            const gainOsc = audioCtx.createGain();
+
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(450, now);
+            osc.frequency.exponentialRampToValueAtTime(110, now + 0.08);
+
+            gainOsc.gain.setValueAtTime(0.75, now);
+            gainOsc.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+            osc.connect(gainOsc);
+            gainOsc.connect(audioCtx.destination);
+
+            osc.start(now);
+            osc.stop(now + 0.08);
+
+            if (noiseBuffer) {
+                const noise = audioCtx.createBufferSource();
+                noise.buffer = noiseBuffer;
+
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'highpass';
+                filter.frequency.value = 800;
+
+                const noiseGain = audioCtx.createGain();
+                noiseGain.gain.setValueAtTime(0.9, now);
+                noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+
+                noise.connect(filter);
+                filter.connect(noiseGain);
+                noiseGain.connect(audioCtx.destination);
+
+                noise.start(now);
+                noise.stop(now + 0.09);
+            }
+        } catch(e) {}
+    }
+
+    function drawFilmGrain() {
+        ctx.save();
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.025)';
+        for (let i = 0; i < 180; i++) {
+            const gx = Math.random() * GAME_WIDTH;
+            const gy = Math.random() * GAME_HEIGHT;
+            ctx.fillRect(gx, gy, 2, 2);
+        }
+        ctx.restore();
+    }
+
+    function drawPixelBox(x, y, w, h, bgColor, borderColor, shadowColor = '#000000', pixelSize = 4) {
+        ctx.save();
+        ctx.fillStyle = shadowColor;
+        ctx.fillRect(x + pixelSize, y + pixelSize, w, h);
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = borderColor;
+        ctx.fillRect(x, y, w, pixelSize); 
+        ctx.fillRect(x, y + h - pixelSize, w, pixelSize); 
+        ctx.fillRect(x, y, pixelSize, h); 
+        ctx.fillRect(x + w - pixelSize, y, pixelSize, h); 
+        ctx.restore();
+    }
+
+    function drawPixelText(text, x, y, color = '#ffffff', fontSize = 18, align = 'center', useOnlyStitchFont = false) {
+        ctx.save();
+        if (useOnlyStitchFont) {
+            ctx.font = `${fontSize}px "StitchPixelFont", monospace`;
+        } else {
+            ctx.font = `${fontSize}px "Press Start 2P", "StitchPixelFont", monospace`;
+        }
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        
+        ctx.fillStyle = '#000000';
+        const offsets = [[-2,0], [2,0], [0,-2], [0,2], [-2,-2], [2,-2], [-2,2], [2,2]];
+        for (let [ox, oy] of offsets) {
+            ctx.fillText(text, x + ox, y + oy);
+        }
+        
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
+    function drawPixelTomatoIcon(cx, cy, scale = 1.0) {
+        ctx.save();
+        ctx.translate(Math.round(cx), Math.round(cy));
+        ctx.scale(scale, scale);
+
+        let mainColor = '#d50000';
+        let highlightColor = '#ff8a80';
+        let stemColor = '#1b5e20';
+
+        ctx.fillStyle = stemColor;
+        ctx.fillRect(-6, -22, 12, 6);
+        ctx.fillRect(-3, -25, 6, 4);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        ctx.fillStyle = highlightColor;
+        ctx.fillRect(-12, -12, 8, 8);
+        ctx.restore();
+    }
+
+    function drawClassicTomato(x, y, type, targetSize = 55) {
+        ctx.save();
+        ctx.imageSmoothingEnabled = false;
+
+        const scale = (targetSize / 42) * 1.165;
+
+        if (type === 'golden_tomato') {
+            const alpha = 0.4 + Math.sin(Date.now() / 150) * 0.25;
+            ctx.fillStyle = `rgba(255, 215, 0, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(x, y, 32 * scale, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.translate(Math.round(x), Math.round(y));
+        ctx.scale(scale, scale);
+
+        let mainColor = '#d50000';
+        let highlightColor = '#ff8a80';
+        let stemColor = '#1b5e20';
+
+        if (type === 'golden_tomato') {
+            mainColor = '#e53935';
+            highlightColor = '#fff59d';
+            stemColor = '#76ff03';
+        } else if (type === 'rotten_tomato') {
+            mainColor = '#6a1b29';
+            highlightColor = '#a73a4b';
+            stemColor = '#33691e';
+        }
+
+        ctx.fillStyle = stemColor;
+        ctx.fillRect(-6, -22, 12, 6);
+        ctx.fillRect(-3, -25, 6, 4);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        if (type === 'rotten_tomato') {
+            ctx.fillStyle = '#2d0812';
+            ctx.fillRect(-14, 2, 28, 17);
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(-10, 8, 20, 10);
+        }
+
+        ctx.fillStyle = highlightColor;
+        ctx.fillRect(-12, -12, 8, 8);
+
+        ctx.restore();
+    }
+
+    class ConveyorItem {
+        constructor(type) {
+            this.type = type; 
+            this.x = -40;
+            this.y = TARGET_Y;
+            this.speed = isFever ? (baseMovementSpeed + 120) : baseMovementSpeed; 
+            this.isCaptured = false;
+        }
+
+        update(delta) {
+            this.x += this.speed * delta;
+        }
+
+        draw() {
+            if (this.isCaptured) return;
+            drawClassicTomato(this.x, this.y, this.type, 55);
+        }
+    }
+
+    class TomatoFountainParticle {
+        constructor() {
+            this.x = Math.random() * 20; 
+            this.y = TARGET_Y + 10;
+            this.vx = Math.random() * 9 + 6; 
+            this.vy = -(Math.random() * 11 + 10); 
+            this.gravity = 0.55;
+            this.rotation = Math.random() * Math.PI * 2;
+            this.vRot = (Math.random() - 0.5) * 0.2;
+            this.life = 50;
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += this.gravity;
+            this.rotation += this.vRot;
+            this.life--;
+        }
+
+        draw() {
+            if (this.life <= 0) return;
+            drawClassicTomato(this.x, this.y, 'tomato', 55);
+        }
+    }
+
+    class Particle {
+        constructor(x, y, color) {
+            this.x = x + (Math.random() - 0.5) * 55; 
+            this.y = y + (Math.random() - 0.5) * 55;
+            this.vx = (Math.random() - 0.5) * 16;   
+            this.vy = (Math.random() - 0.5) * 16;
+            this.size = Math.random() * 11 + 5;
+            this.color = color;
+            this.life = 28;
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life--;
+        }
+
+        draw() {
+            if (this.life <= 0) return;
+            ctx.fillStyle = this.color;
+            ctx.fillRect(Math.round(this.x), Math.round(this.y), this.size, this.size);
+        }
+    }
+
+    class FloatingText {
+        constructor(text, color) {
+            this.text = text;
+            this.color = color;
+            this.x = TARGET_CENTER_X;
+            this.y = TARGET_Y - 60;
+            this.opacity = 1.0;
+        }
+
+        update() {
+            this.y -= 1.5;
+            this.opacity -= 0.025;
+        }
+
+        draw() {
+            if (this.opacity <= 0) return;
+            drawPixelText(this.text, this.x, this.y, this.color, 16, 'center');
+        }
+    }
+
+    function triggerGameOver() {
+        gameState = 'GAMEOVER';
+        gameOverLockTimer = 0.5;
+    }
+
+    function handleSpawning() {
+        if (gameState !== 'PLAYING' || isWaitingClear || delaySpawnTimer > 0) return;
+
+        if (score >= feverScoreThreshold && !isFever) {
+            isFever = true;
+            feverTimer = MAX_FEVER_TIME; 
+            playPulseKick();
+            floatingTexts.push(new FloatingText("🔥 BREAK THE RULES! 🔥", '#ffea00'));
+        }
+
+        if (score >= nextRushTriggerScore && !isRushMode && !isFever) {
+            isRushMode = true;
+            rushCount = 5;
+            nextRushTriggerScore += 2000;
+        }
+
+        const now = getAccurateTime();
+        let currentTargetInterval = isFever ? (0.12 * BEAT_INTERVAL) : (isRushMode ? (0.4 * BEAT_INTERVAL) : (normalBeatPattern[currentBeatPatternIndex] * BEAT_INTERVAL));
+
+        if (now - lastSpawnTime >= currentTargetInterval) {
+            const lastItem = items.slice().reverse().find(i => !i.isCaptured);
+            if (lastItem && lastItem.x < 15) return;
+
+            const rand = Math.random();
+            let baseType = 'tomato';
+
+            if (!isFever) {
+                if (rand < 0.10) baseType = 'golden_tomato';
+                else if (rand < 0.35) baseType = 'rotten_tomato';
+                else baseType = 'tomato';
+            }
+
+            items.push(new ConveyorItem(baseType));
+            lastSpawnTime = now;
+
+            if (!isFever) {
+                if (isRushMode) {
+                    rushCount--;
+                    if (rushCount <= 0) isRushMode = false;
+                } else {
+                    currentBeatPatternIndex = (currentBeatPatternIndex + 1) % normalBeatPattern.length;
+                }
+            }
+        }
+    }
+
+    function trigger3FrameAnimation() {
+        bgAnimFrameCount = 8;
+    }
+
+    function updateBgAnim() {
+        if (bgAnimFrameCount > 0) {
+            bgAnimFrameCount--;
+            if (bgAnimFrameCount > 4) {
+                currentBgImg = bgImg2.isReady ? bgImg2 : bgImg1;
+            } else {
+                currentBgImg = bgImg3.isReady ? bgImg3 : bgImg1;
+            }
+        } else {
+            currentBgImg = bgImg1;
+        }
+    }
+
+    function performAction() {
+        initAudioContext();
+
+        if (gameState !== 'PLAYING') return;
+
+        trigger3FrameAnimation();
+        lastSpawnTime = getAccurateTime();
+
+        if (isFever) {
+            let targetCandidate = null;
+            let minDist = 9999;
+
+            for (let i = 0; i < items.length; i++) {
+                if (!items[i].isCaptured) {
+                    let dist = Math.abs(items[i].x - TARGET_CENTER_X);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        targetCandidate = items[i];
+                    }
+                }
+            }
+
+            if (targetCandidate) {
+                targetCandidate.isCaptured = true;
+                score += 200;
+                screenShakeTimer = 4;
+                playPulseKick(); 
+                floatingTexts.push(new FloatingText("+200", '#ffea00'));
+                
+                for (let k = 0; k < 15; k++) {
+                    particles.push(new Particle(targetCandidate.x, targetCandidate.y, '#d50000'));
+                    particles.push(new Particle(targetCandidate.x, targetCandidate.y, '#ffd600'));
+                }
+                items.splice(items.indexOf(targetCandidate), 1);
+            }
+            return;
+        }
+
+        let hitFound = false;
+
+        for (let i = 0; i < items.length; i++) {
+            let item = items[i];
+            if (!item.isCaptured) {
+                let dist = Math.abs(item.x - TARGET_CENTER_X);
+
+                if (dist <= GOOD_RANGE) {
+                    hitFound = true;
+                    item.isCaptured = true;
+
+                    if (item.type === 'rotten_tomato') {
+                        lives--;
+                        playSlapNoise();
+                        floatingTexts.push(new FloatingText("BAD! -1 ❤️", '#ff1744'));
+                        for (let k = 0; k < 18; k++) particles.push(new Particle(item.x, item.y, '#6a1b29'));
+                    } else if (dist <= PERFECT_RANGE) {
+                        playPulseKick();
+                        if (item.type === 'golden_tomato') {
+                            score += 200;
+                            if (lives < 3) lives++;
+                            floatingTexts.push(new FloatingText("+❤️", '#ff4081'));
+                            for (let k = 0; k < 24; k++) particles.push(new Particle(item.x, item.y, '#ffd600'));
+                        } else {
+                            score += 200;
+                            floatingTexts.push(new FloatingText("PERFECT! +200", '#00e676'));
+                            for (let k = 0; k < 20; k++) particles.push(new Particle(item.x, item.y, '#76ff03'));
+                        }
+                    } else {
+                        score += 100;
+                        playSlapNoise();
+                        floatingTexts.push(new FloatingText("GOOD! +100", '#ffeb3b'));
+                        for (let k = 0; k < 12; k++) particles.push(new Particle(item.x, item.y, '#ffea00'));
+                    }
+
+                    items.splice(i, 1);
+                    break;
+                }
+            }
+        }
+
+        if (!hitFound) floatingTexts.push(new FloatingText("MISS!", '#ff1744'));
+
+        if (lives <= 0) {
+            triggerGameOver();
+        }
+    }
+
+    // 💡 繪製選曲選單
+    function drawSelectSongMenu() {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+        ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        drawPixelBox(80, 50, 640, 500, '#111111', '#C1001B', '#000000', 6);
+        drawPixelText('SELECT BGM / SPEED', GAME_WIDTH / 2, 100, '#ffea00', 22, 'center');
+
+        for (let i = 0; i < songList.length; i++) {
+            const song = songList[i];
+            const btnY = 170 + i * 105;
+            const isSelected = (i === selectedSongIdx);
+            const bgColor = isSelected ? '#C1001B' : '#222222';
+            const borderColor = isSelected ? '#ffea00' : '#ffffff';
+
+            drawPixelBox(140, btnY, 520, 80, bgColor, borderColor, '#000000', 4);
+            
+            drawPixelText(song.name, GAME_WIDTH / 2, btnY + 28, isSelected ? '#ffffff' : '#cccccc', 18, 'center');
+            drawPixelText(`BPM: ${song.bpm}  |  SPEED: ${song.baseSpeed}`, GAME_WIDTH / 2, btnY + 56, song.color, 12, 'center');
+        }
+
+        const startFlash = Math.floor(Date.now() / 300) % 2 === 0;
+        if (startFlash) {
+            drawPixelText('TAP TO START DANCE!', GAME_WIDTH / 2, 510, '#00e676', 15, 'center');
+        }
+        ctx.restore();
+    }
+
+    function handleCountdown(delta) {
+        if (gameState !== 'COUNTDOWN') return;
+
+        countdownTimer += delta;
+
+        const steps = [
+            { text: '3', color: '#ffffff', sound: 'beep' },
+            { text: '2', color: '#ffea00', sound: 'beep' },
+            { text: '1', color: '#ff9800', sound: 'beep' },
+            { text: 'START!', color: '#ff1744', sound: 'beep_final' }
+        ];
+
+        const stepInterval = 0.85;
+        const currentIdx = Math.floor(countdownTimer / stepInterval);
+
+        if (countdownStep === -1 && currentIdx === 0) {
+            try {
+                if (window.parent) {
+                    window.parent.postMessage({ action: 'PAUSE_BGM' }, '*');
+                }
+            } catch(e) {}
+        }
+
+        if (currentIdx !== countdownStep && currentIdx < steps.length) {
+            countdownStep = currentIdx;
+            playBeepSound(steps[countdownStep].sound);
+        }
+
+        if (currentIdx >= steps.length) {
+            gameState = 'PLAYING';
+            lastSpawnTime = getAccurateTime();
+
+            try {
+                if (window.parent) {
+                    window.parent.postMessage({ action: 'SYNC_BGM' }, '*');
+                }
+            } catch(e) {}
+
+            return;
+        }
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+        ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        const step = steps[countdownStep] || steps[0];
+        const progressInStep = (countdownTimer % stepInterval) / stepInterval;
+        const scale = 1.0 + Math.sin(progressInStep * Math.PI) * 0.35; 
+
+        ctx.translate(GAME_WIDTH / 2, GAME_HEIGHT / 2);
+        ctx.scale(scale, scale);
+        drawPixelText(step.text, 0, 0, step.color, 76, 'center');
+        ctx.restore();
+    }
+
+    function updateGame(delta) {
+        if (gameState === 'GAMEOVER') {
+            if (gameOverLockTimer > 0) {
+                gameOverLockTimer -= delta;
+                if (gameOverLockTimer < 0) gameOverLockTimer = 0;
+            }
+            return;
+        }
+
+        if (gameState !== 'PLAYING') return;
+
+        updateBgAnim();
+
+        if (isFever) {
+            feverTimer -= delta;
+
+            if (Math.random() < 0.45) {
+                tomatoFountainParticles.push(new TomatoFountainParticle());
+            }
+
+            if (Math.random() < 0.7) {
+                particles.push(new Particle(TARGET_CENTER_X, TARGET_Y, '#ffd600'));
+                particles.push(new Particle(TARGET_CENTER_X, TARGET_Y, '#ff1744'));
+            }
+
+            if (feverTimer <= 0) {
+                isFever = false;
+                isWaitingClear = true; 
+                floatingTexts.push(new FloatingText("FEVER FINISH!", '#ffeb3b'));
+
+                // 💡 修改點：Fever Mode 結束後大幅提升 60 px/sec 速度（體感加速超明顯！）
+                baseMovementSpeed += 60;
+                floatingTexts.push(new FloatingText("SPEED UP!! +60", '#00e676'));
+            }
+        }
+
+        if (isWaitingClear) {
+            if (items.length === 0) {
+                isWaitingClear = false;
+                delaySpawnTimer = 1.0; 
+                feverScoreThreshold = score + 8000; 
+            }
+        }
+
+        if (delaySpawnTimer > 0) {
+            delaySpawnTimer -= delta;
+            if (delaySpawnTimer < 0) delaySpawnTimer = 0;
+        }
+
+        handleSpawning();
+
+        for (let i = items.length - 1; i >= 0; i--) {
+            let item = items[i];
+            item.update(delta);
+
+            if (item.x > GAME_WIDTH + 40) {
+                if (!isFever && !isWaitingClear && delaySpawnTimer <= 0 && (item.type === 'tomato' || item.type === 'golden_tomato')) {
+                    lives--;
+                    floatingTexts.push(new FloatingText("MISSED! -1 ❤️", '#ff1744'));
+                    if (lives <= 0) {
+                        triggerGameOver();
+                    }
+                }
+                items.splice(i, 1);
+            }
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.update();
+            if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        for (let i = tomatoFountainParticles.length - 1; i >= 0; i--) {
+            let tfp = tomatoFountainParticles[i];
+            tfp.update();
+            if (tfp.life <= 0) tomatoFountainParticles.splice(i, 1);
+        }
+
+        for (let i = floatingTexts.length - 1; i >= 0; i--) {
+            let ft = floatingTexts[i];
+            ft.update();
+            if (ft.opacity <= 0) floatingTexts.splice(i, 1);
+        }
+    }
+
+    function drawUI() {
+        if (gameState === 'SELECT_SONG') {
+            drawSelectSongMenu();
+            return;
+        }
+
+        ctx.save();
+        if (isFever) {
+            ctx.strokeStyle = '#ff1744';
+            ctx.lineWidth = 6;
+            ctx.strokeRect(TARGET_CENTER_X - GOOD_RANGE - 10, TARGET_Y - 50, (GOOD_RANGE + 10) * 2, 100);
+        } else {
+            ctx.strokeStyle = 'rgba(255, 235, 59, 0.7)';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(TARGET_CENTER_X - GOOD_RANGE, TARGET_Y - 40, GOOD_RANGE * 2, 80);
+
+            ctx.strokeStyle = '#00e676';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(TARGET_CENTER_X - PERFECT_RANGE, TARGET_Y - 40, PERFECT_RANGE * 2, 80);
+        }
+        ctx.restore();
+
+        drawPixelBox(20, 20, 240, 50, '#111111', '#ffffff', '#000000', 4);
+        drawPixelText(`SCORE:${score}`, 140, 47, '#ffffff', 14, 'center');
+
+        let heartsStr = '';
+        for (let i = 0; i < 3; i++) {
+            heartsStr += (i < lives) ? '❤️' : '🖤';
+        }
+        const hpColor = lives <= 1 ? '#ff1744' : '#ffeb3b';
+        drawPixelBox(GAME_WIDTH - 260, 20, 240, 50, '#111111', hpColor, '#000000', 4);
+        drawPixelText(`HP:${heartsStr}`, GAME_WIDTH - 140, 47, hpColor, 14, 'center');
+
+        const fBarX = 280;
+        const fBarY = 32;
+        const fBarW = 240;
+        const fBarH = 22;
+        const radius = 11;
+
+        let fBorderColor = '#555555';
+        let fFillRatio = 0;
+
+        if (isFever) {
+            const flashTick = Math.floor(Date.now() / 60) % 3;
+            fBorderColor = flashTick === 0 ? '#ffea00' : (flashTick === 1 ? '#ff1744' : '#ffffff');
+            fFillRatio = Math.max(0, feverTimer / MAX_FEVER_TIME);
+        } else {
+            const currentFloorScore = feverScoreThreshold - 8000;
+            const progressScore = Math.max(0, score - currentFloorScore);
+            fFillRatio = Math.min(1.0, progressScore / 8000.0);
+            fBorderColor = fFillRatio >= 1.0 ? '#ff1744' : '#555555';
+        }
+
+        function drawRoundedBarPath(x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.arc(x + r, y + r, r, Math.PI * 0.5, Math.PI * 1.5);
+            ctx.lineTo(x + w - r, y);
+            ctx.arc(x + w - r, y + r, r, Math.PI * 1.5, Math.PI * 0.5);
+            ctx.lineTo(x + r, y + h);
+            ctx.closePath();
+        }
+
+        ctx.save();
+        ctx.fillStyle = '#000000';
+        drawRoundedBarPath(fBarX + 3, fBarY + 3, fBarW, fBarH, radius);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
+        drawRoundedBarPath(fBarX, fBarY, fBarW, fBarH, radius);
+        ctx.fill();
+
+        ctx.strokeStyle = fBorderColor;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        if (fFillRatio > 0) {
+            ctx.save();
+            drawRoundedBarPath(fBarX, fBarY, fBarW, fBarH, radius);
+            ctx.clip();
+
+            const fillW = fBarW * fFillRatio;
+            const cycle = (Date.now() % 3000) / 3000;
+            const shift = (Math.sin(cycle * Math.PI * 2) + 1) / 2;
+
+            const grad = ctx.createLinearGradient(fBarX, fBarY, fBarX + fBarW, fBarY);
+            if (shift < 0.5) {
+                grad.addColorStop(0, '#ff1744');
+                grad.addColorStop(0.5 + shift, '#ffea00');
+                grad.addColorStop(1, '#ff1744');
+            } else {
+                grad.addColorStop(0, '#ffea00');
+                grad.addColorStop(shift - 0.5, '#ff1744');
+                grad.addColorStop(1, '#ffea00');
+            }
+
+            ctx.fillStyle = grad;
+            ctx.fillRect(fBarX, fBarY, fillW, fBarH);
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.fillRect(fBarX, fBarY, fillW, 3);
+            ctx.restore();
+        }
+
+        drawClassicTomato(fBarX + fBarW / 2, fBarY + fBarH / 2, 'tomato', 55);
+        ctx.restore();
+
+        if (isFever) {
+            drawPixelText("🔥BREAK THE RULES!!🔥", GAME_WIDTH / 2, fBarY - 14, '#ffea00', 12, 'center');
+        } else if (isWaitingClear || delaySpawnTimer > 0) {
+            drawPixelText("READY...", GAME_WIDTH / 2, fBarY - 14, '#ffeb3b', 12, 'center');
+        }
+
+        for (let p of particles) p.draw();
+        for (let tfp of tomatoFountainParticles) tfp.draw(); 
+        for (let ft of floatingTexts) ft.draw();
+
+        if (gameState === 'GAMEOVER') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.90)';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+            drawPixelBox(100, 70, 600, 460, '#111111', '#ff1744', '#000000', 6);
+            drawPixelText('GAME OVER', GAME_WIDTH / 2, 130, '#ff1744', 28, 'center');
+            drawPixelText(`FINAL SCORE: ${score}`, GAME_WIDTH / 2, 190, '#ffeb3b', 16, 'center');
+
+            if (gameOverLockTimer > 0) {
+                drawPixelText(`PLEASE WAIT...`, GAME_WIDTH / 2, 280, '#888888', 14, 'center');
+            } else {
+                drawPixelBox(180, 260, 440, 50, '#d50000', '#ffea00', '#000000', 4);
+                drawPixelText('CONTINUE?', GAME_WIDTH / 2, 285, '#ffffff', 14, 'center');
+
+                drawPixelBox(180, 330, 440, 50, '#333333', '#ffffff', '#000000', 4);
+                drawPixelText('GONNA STOP?', GAME_WIDTH / 2, 355, '#ff4081', 14, 'center');
+
+                const mvBtnX = 155;
+                const mvBtnY = 430;
+                const mvBtnW = 490;
+                const mvBtnH = 70;
+                drawPixelBox(mvBtnX, mvBtnY, mvBtnW, mvBtnH, '#ffffff', '#C1001B', '#000000', 4);
+                
+                drawPixelTomatoIcon(mvBtnX + 28, mvBtnY + mvBtnH / 2, 1.0);
+                drawPixelText('按此觀看COLLAR《管理還管你》MV', GAME_WIDTH / 2, mvBtnY + mvBtnH / 2, '#ffffff', 21, 'center', true);
+                drawPixelTomatoIcon(mvBtnX + mvBtnW - 28, mvBtnY + mvBtnH / 2, 1.0);
+            }
+        }
+    }
+
+    function resetGame() {
+        score = 0;
+        lives = 3;
+        gameOverLockTimer = 0;
+        items = [];
+        particles = [];
+        tomatoFountainParticles = [];
+        floatingTexts = [];
+        lastSpawnTime = getAccurateTime();
+        currentBeatPatternIndex = 0;
+
+        // 套用選中的歌曲設定
+        const selectedSong = songList[selectedSongIdx];
+        BPM = selectedSong.bpm;
+        BEAT_INTERVAL = (60 / BPM) * 1000;
+        baseMovementSpeed = selectedSong.baseSpeed;
+
+        isRushMode = false;
+        rushCount = 0;
+        nextRushTriggerScore = 2000;
+        isFever = false;
+        feverTimer = 0;
+        feverScoreThreshold = 8000;
+        isWaitingClear = false;
+        delaySpawnTimer = 0;
+        bgAnimFrameCount = 0;
+
+        gameState = 'COUNTDOWN';
+        countdownStep = -1;
+        countdownTimer = 0;
+    }
+
+    let lastFrameTime = performance.now();
+
+    function gameLoop() {
+        const now = performance.now();
+        const rawDelta = (now - lastFrameTime) / 1000;
+        const delta = Math.min(rawDelta, 0.033);
+        lastFrameTime = now;
+
+        ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        ctx.save();
+        if (screenShakeTimer > 0) {
+            const shakeX = (Math.random() - 0.5) * 16;
+            const shakeY = (Math.random() - 0.5) * 16;
+            ctx.translate(shakeX, shakeY);
+            screenShakeTimer--;
+        }
+
+        if (currentBgImg && (currentBgImg.isReady || (currentBgImg.complete && currentBgImg.naturalWidth !== 0))) {
+            ctx.drawImage(currentBgImg, 0, 0, GAME_WIDTH, GAME_HEIGHT);
+        } else {
+            ctx.fillStyle = '#222';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+        }
+
+        updateGame(delta);
+
+        for (let item of items) item.draw();
+        
+        drawUI();
+
+        if (gameState === 'COUNTDOWN') {
+            handleCountdown(delta);
+        }
+
+        ctx.restore();
+
+        drawFilmGrain();
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    function handleInput(e) {
+        if (e) e.preventDefault();
+
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+        const clientY = e.clientY || (e.touches && e.touches[0] ? e.touches[0].clientY : 0);
+        const x = (clientX - rect.left) * (GAME_WIDTH / rect.width);
+        const y = (clientY - rect.top) * (GAME_HEIGHT / rect.height);
+
+        // 💡 選曲畫面點擊邏輯
+        if (gameState === 'SELECT_SONG') {
+            for (let i = 0; i < songList.length; i++) {
+                const btnY = 170 + i * 105;
+                if (x >= 140 && x <= 660 && y >= btnY && y <= btnY + 80) {
+                    selectedSongIdx = i;
+                    resetGame();
+                    return;
+                }
+            }
+            return;
+        }
+
+        if (gameState === 'GAMEOVER' && gameOverLockTimer <= 0) {
+            if (x >= 180 && x <= 620 && y >= 260 && y <= 310) {
+                gameState = 'SELECT_SONG';
+                return;
+            }
+            if (x >= 180 && x <= 620 && y >= 330 && y <= 380) {
+                try {
+                    if (window.top && window.top !== window) {
+                        window.top.location.reload();
+                    } else {
+                        window.location.reload();
+                    }
+                } catch (err) {
+                    if (window.parent) {
+                        window.parent.postMessage({ action: 'RELOAD_GAME' }, '*');
+                    } else {
+                        window.location.reload();
+                    }
+                }
+                return;
+            }
+            if (x >= 155 && x <= 645 && y >= 430 && y <= 500) {
+                window.open('https://youtu.be/4DObQP77xAs?si=lQ__OsG39YGlsKWd', '_blank');
+                return;
+            }
+            return;
+        }
+
+        performAction();
+    }
+
+    container.addEventListener('pointerdown', handleInput);
+
+    gameLoop();
+}
+
+if (document.readyState === 'interactive' || document.readyState === 'complete') {
+    initGame();
+} else {
+    document.addEventListener('DOMContentLoaded', initGame);
+}
+</script>
+
+</body>
+</html>

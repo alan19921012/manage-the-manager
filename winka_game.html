@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Tomato Pipe Switcher - Winka Game Turbo Edition</title>
+    <!-- 💡 引入 Google Fonts 可愛像素字型 Press Start 2P -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        /* 💡 載入本地 fonts 資料夾內的「縫合像素繁體-12px-比例.ttf」 */
+        @font-face {
+            font-family: 'StitchPixelFont';
+            src: url('./fonts/縫合像素繁體-12px-比例.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+        }
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            font-family: 'Press Start 2P', 'StitchPixelFont', monospace;
+        }
+        #gameContainer {
+            position: relative;
+            width: 96vw;
+            height: 72vw;
+            max-width: 800px;
+            max-height: 600px;
+            background-color: #000;
+            box-shadow: 0 0 30px #000;
+            overflow: hidden;
+            touch-action: none;
+        }
+        #gameCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            image-rendering: auto;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+</div>
+
+<script>
+(function() {
+    const canvas = document.getElementById('gameCanvas');
+    const container = document.getElementById('gameContainer');
+
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    const GAME_WIDTH = 800;
+    const GAME_HEIGHT = 600;
+
+    let bgDrawRect = { x: 0, y: 0, w: GAME_WIDTH, h: GAME_HEIGHT, bottom: GAME_HEIGHT };
+
+    // Film Grain 微粒質感
+    const noiseCanvas = document.createElement('canvas');
+    noiseCanvas.width = 160;
+    noiseCanvas.height = 120;
+    const noiseCtx = noiseCanvas.getContext('2d');
+
+    function updateFilmGrain() {
+        if (!noiseCtx) return;
+        const imgData = noiseCtx.createImageData(160, 120);
+        const buffer = new Uint32Array(imgData.data.buffer);
+        const len = buffer.length;
+        for (let i = 0; i < len; i++) {
+            const val = Math.floor(Math.random() * 255);
+            buffer[i] = (22 << 24) | (val << 16) | (val << 8) | val;
+        }
+        noiseCtx.putImageData(imgData, 0, 0);
+    }
+
+    function drawFilmGrainOverlay() {
+        ctx.save();
+        ctx.globalCompositeOperation = 'overlay';
+        ctx.globalAlpha = 0.6;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(noiseCanvas, 0, 0, GAME_WIDTH, GAME_HEIGHT);
+        ctx.restore();
+    }
+
+    const TUBE_CONFIG = {
+        leftX: 146,
+        leftWidth: 136,
+        leftY: 0,
+        leftHeight: 290,
+
+        rightX: 503,
+        rightWidth: 130,
+        rightY: 0,
+        rightHeight: 280
+    };
+
+    function loadRobustImage(baseName) {
+        const img = new Image();
+        img.isReady = false;
+        const sources = [
+            `images/${baseName}.png`,
+            `images/${baseName}.jpg`,
+            `./images/${baseName}.png`,
+            `./images/${baseName}.jpg`,
+            `${baseName}.png`,
+            `${baseName}.jpg`
+        ];
+        let srcIdx = 0;
+
+        img.onload = () => { img.isReady = true; };
+        img.onerror = () => {
+            srcIdx++;
+            if (srcIdx < sources.length) {
+                img.src = sources[srcIdx];
+            } else {
+                img.isReady = false;
+            }
+        };
+        img.src = sources[0];
+        return img;
+    }
+
+    let winkaBgs = [], tubeImages = [], tube4Image;
+
+    try {
+        for (let i = 1; i <= 7; i++) {
+            winkaBgs.push(loadRobustImage(`winkabg${i}`));
+        }
+        tubeImages = [
+            loadRobustImage('tube1'),
+            loadRobustImage('tube2'),
+            loadRobustImage('tube3')
+        ];
+        tube4Image = loadRobustImage('tube4');
+    } catch(e) {}
+
+    let score = 0;
+    let hp = 3;
+    const maxHp = 3;
+    let totalTomatoesSpawned = 0;
+
+    // 💡 倒數計時相關變數
+    let gameStarted = false;
+    let isCountingDown = true;
+    let countdownStep = -1;
+    let countdownTimer = 0;
+
+    let gameOver = false;
+    let isPaused = false;
+    let gameOverLockTime = 0;
+    let glowTimer = 0;
+
+    let baseSpeedInterval = 0.15;
+
+    // Fever Mode 變數
+    let comboCount = 0;
+    let isFever = false;
+    let feverTimer = 0;
+    const MAX_FEVER_TIME = 6.0;
+    let feverCooldown = 0;
+    let screenShake = 0;
+    let shakeOffsetX = 0;
+    let shakeOffsetY = 0;
+
+    let currentFrameIndex = 0;
+    let animTimer = 0;
+
+    let particles = [];
+    let bottomEmitters = [];
+    let floatingTexts = [];
+
+    let audioCtx = null;
+    let lastTime = Date.now();
+
+    let leftPipeType = 0;
+    const pipeTypes = ['normal', 'golden', 'rotten'];
+
+    const buttons = [
+        { id: 0, type: 'normal', x: 82,  y: 524, w: 136, h: 68, color: '#00e676', bg: '#1b5e20' },
+        { id: 1, type: 'golden', x: 332, y: 524, w: 136, h: 68, color: '#ffea00', bg: '#854d0e' },
+        { id: 2, type: 'rotten', x: 582, y: 524, w: 136, h: 68, color: '#ff1744', bg: '#881337' }
+    ];
+
+    const buttonHitboxes = [
+        { id: 0, x: 40,  y: 480, w: 200, h: 120 },
+        { id: 1, x: 290, y: 480, w: 220, h: 120 },
+        { id: 2, x: 540, y: 480, w: 220, h: 120 }
+    ];
+
+    let transport = {
+        active: false,
+        type: 'normal',
+        step: 0,
+        speed: 0.15
+    };
+
+    // 💡 獨立模式 AudioContext + 事件解鎖機制
+    function initAudioContext() {
+        try {
+            if (!audioCtx) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (AudioContextClass) audioCtx = new AudioContextClass();
+            }
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        } catch(e) {}
+    }
+
+    // 💡 監聽來自父頁面的解鎖訊號
+    window.addEventListener('message', (e) => {
+        if (e.data === 'UNLOCK_AUDIO' || (e.data && e.data.action === 'UNLOCK_AUDIO')) {
+            initAudioContext();
+        }
+    });
+
+    window.addEventListener('pointerdown', initAudioContext, { passive: true });
+    window.addEventListener('touchstart', initAudioContext, { passive: true });
+
+    function handleVisibilityChange() {
+        if (document.hidden || document.webkitHidden) {
+            isPaused = true;
+        } else {
+            isPaused = false;
+            lastTime = Date.now();
+        }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('webkitvisibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', () => { isPaused = true; });
+    window.addEventListener('focus', () => { isPaused = false; lastTime = Date.now(); });
+
+    function playSound(type) {
+        if (isPaused) return;
+        try {
+            initAudioContext();
+            if (!audioCtx) return;
+
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+
+            if (type === 'switch') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(500, now);
+                osc.frequency.exponentialRampToValueAtTime(850, now + 0.06);
+                gain.gain.setValueAtTime(0.15, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.06);
+                osc.start(now);
+                osc.stop(now + 0.06);
+            } else if (type === 'success') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(523, now);
+                osc.frequency.setValueAtTime(783, now + 0.08);
+                gain.gain.setValueAtTime(0.25, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.18);
+                osc.start(now);
+                osc.stop(now + 0.18);
+            } else if (type === 'fail') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(160, now);
+                osc.frequency.linearRampToValueAtTime(60, now + 0.22);
+                gain.gain.setValueAtTime(0.3, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.22);
+                osc.start(now);
+                osc.stop(now + 0.22);
+            } else if (type === 'fever') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(523, now);
+                osc.frequency.setValueAtTime(659, now + 0.08);
+                osc.frequency.setValueAtTime(783, now + 0.16);
+                gain.gain.setValueAtTime(0.4, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.25);
+                osc.start(now);
+                osc.stop(now + 0.25);
+            } else if (type === 'beep') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(440, now);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+                osc.start(now);
+                osc.stop(now + 0.15);
+            } else if (type === 'beep_final') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(880, now);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                osc.start(now);
+                osc.stop(now + 0.3);
+            }
+        } catch(e) {}
+    }
+
+    function drawSmoothImage(img) {
+        if (!img || !img.isReady || img.width === 0 || img.height === 0) return false;
+        try {
+            ctx.save();
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+
+            const imgRatio = img.width / img.height;
+            const canvasRatio = GAME_WIDTH / GAME_HEIGHT;
+            let drawW, drawH, drawX, drawY;
+
+            if (imgRatio > canvasRatio) {
+                drawH = GAME_HEIGHT;
+                drawW = GAME_HEIGHT * imgRatio;
+                drawX = (GAME_WIDTH - drawW) / 2;
+                drawY = 0;
+            } else {
+                drawW = GAME_WIDTH;
+                drawH = GAME_WIDTH / imgRatio;
+                drawX = 0;
+                drawY = (GAME_HEIGHT - drawH) / 2;
+            }
+
+            bgDrawRect = { x: drawX, y: drawY, w: drawW, h: drawH, bottom: drawY + drawH };
+
+            ctx.drawImage(img, drawX, drawY, drawW, drawH);
+            ctx.restore();
+            return true;
+        } catch(e) {
+            return false;
+        }
+    }
+
+    function drawTubeImageFitted(img, x, y, w, h) {
+        if (!img || !img.isReady || img.width === 0 || img.height === 0) return false;
+        try {
+            ctx.save();
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, x, y, w, h);
+            ctx.restore();
+            return true;
+        } catch(e) {
+            return false;
+        }
+    }
+
+    function drawPixelBox(x, y, w, h, bgColor, borderColor, shadowColor = '#000000', pixelSize = 4) {
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        ctx.imageSmoothingEnabled = false;
+        ctx.fillStyle = shadowColor;
+        ctx.fillRect(x + pixelSize, y + pixelSize, w, h);
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = borderColor;
+        ctx.fillRect(x, y, w, pixelSize); 
+        ctx.fillRect(x, y + h - pixelSize, w, pixelSize); 
+        ctx.fillRect(x, y, pixelSize, h); 
+        ctx.fillRect(x + w - pixelSize, y, pixelSize, h); 
+        ctx.restore();
+    }
+
+    function drawPixelText(text, x, y, color = '#ffffff', fontSize = 16, align = 'center', useOnlyStitchFont = false) {
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        ctx.imageSmoothingEnabled = false;
+        if (useOnlyStitchFont) {
+            ctx.font = `${fontSize}px "StitchPixelFont", monospace`;
+        } else {
+            ctx.font = `${fontSize}px "Press Start 2P", "StitchPixelFont", monospace`;
+        }
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        
+        ctx.fillStyle = '#000000';
+        const offsets = [[-2,0], [2,0], [0,-2], [0,2], [-2,-2], [2,-2], [-2,2], [2,2]];
+        for (let [ox, oy] of offsets) {
+            ctx.fillText(text, x + ox, y + oy);
+        }
+        
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
+    function drawPixelTomatoIcon(cx, cy, scale = 1.0) {
+        ctx.save();
+        ctx.translate(Math.round(cx), Math.round(cy));
+        ctx.scale(scale, scale);
+
+        let mainColor = '#d50000';
+        let highlightColor = '#ff8a80';
+        let stemColor = '#1b5e20';
+
+        ctx.fillStyle = stemColor;
+        ctx.fillRect(-6, -22, 12, 6);
+        ctx.fillRect(-3, -25, 6, 4);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        ctx.fillStyle = highlightColor;
+        ctx.fillRect(-12, -12, 8, 8);
+        ctx.restore();
+    }
+
+    class Particle {
+        constructor(x, y, color, customVx = null, customVy = null) {
+            this.x = x;
+            this.y = y;
+            this.vx = customVx !== null ? customVx : (Math.random() - 0.5) * 16;
+            this.vy = customVy !== null ? customVy : (-Math.random() * 16 - 8);
+            this.size = Math.random() * 6 + 7;
+            this.color = color;
+            this.life = 35;
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += 0.5;
+            this.life--;
+        }
+        draw() {
+            if (this.life <= 0) return;
+            ctx.fillStyle = this.color;
+            ctx.fillRect(Math.round(this.x), Math.round(this.y), this.size, this.size);
+        }
+    }
+
+    class BottomTomatoEmitter {
+        constructor(isLeftCorner = null) {
+            const sideLeft = (isLeftCorner !== null) ? isLeftCorner : (Math.random() < 0.5);
+            if (sideLeft) {
+                this.x = Math.random() * 140;
+                this.vx = Math.random() * 5 + 2;
+            } else {
+                this.x = 660 + Math.random() * 140;
+                this.vx = -(Math.random() * 5 + 2);
+            }
+
+            this.y = GAME_HEIGHT + 15;
+            const targetHeight = GAME_HEIGHT * (0.58 + Math.random() * 0.24);
+            this.gravity = 0.52;
+            this.vy = -Math.sqrt(2 * this.gravity * targetHeight);
+
+            this.life = 65;
+            this.size = (Math.random() * 11 + 55);
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += this.gravity;
+            this.life--;
+        }
+
+        draw() {
+            if (this.life <= 0) return;
+            drawClassicTomato(Math.round(this.x), Math.round(this.y), 'normal', this.size);
+        }
+    }
+
+    class FloatingText {
+        constructor(text, color, fontSize = 20) {
+            this.text = text;
+            this.color = color;
+            this.fontSize = fontSize;
+            this.x = GAME_WIDTH / 2;
+            this.y = 290;
+            this.opacity = 1.0;
+        }
+
+        update() {
+            this.y -= 1.8;
+            this.opacity -= 0.03;
+        }
+
+        draw() {
+            if (this.opacity <= 0) return;
+            drawPixelText(this.text, this.x, this.y, this.color, this.fontSize, 'center');
+        }
+    }
+
+    function calculateCurrentSpeed() {
+        if (isFever) return 0.03;
+        return baseSpeedInterval;
+    }
+
+    function spawnNextTomato() {
+        if (!isFever && feverCooldown > 0) return;
+
+        totalTomatoesSpawned++;
+
+        if (isFever) {
+            const rand = Math.random();
+            transport.type = rand < 0.35 ? 'golden' : 'normal';
+        } else if (totalTomatoesSpawned <= 2) {
+            transport.type = 'normal';
+        } else {
+            const rand = Math.random();
+            if (rand < 0.25) {
+                transport.type = 'golden';
+            } else if (rand < 0.5) {
+                transport.type = 'rotten';
+            } else {
+                transport.type = 'normal';
+            }
+        }
+
+        transport.step = 0;
+        transport.speed = calculateCurrentSpeed();
+        transport.active = true;
+        currentFrameIndex = 0;
+        animTimer = 0;
+    }
+
+    function drawClassicTomato(x, y, type, targetSize = 41) {
+        ctx.save();
+        ctx.imageSmoothingEnabled = false;
+
+        let scale = targetSize > 10 ? (targetSize / 42) * 0.9 : targetSize;
+
+        if (type === 'golden') {
+            const alpha = 0.4 + Math.sin(glowTimer) * 0.25;
+            ctx.fillStyle = `rgba(255, 215, 0, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(x, y, 27 * scale, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (type === 'rotten') {
+            const alpha = 0.3 + Math.sin(glowTimer * 2) * 0.2;
+            ctx.fillStyle = `rgba(255, 23, 68, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(x, y, 30 * scale, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.translate(Math.round(x), Math.round(y));
+        ctx.rotate(-Math.PI / 2);
+        ctx.scale(scale, scale);
+
+        let mainColor = '#d50000';
+        let highlightColor = '#ff8a80';
+        let stemColor = '#1b5e20';
+
+        if (type === 'golden') {
+            mainColor = '#e53935';
+            highlightColor = '#fff59d';
+            stemColor = '#76ff03';
+        } else if (type === 'rotten') {
+            mainColor = '#6a1b29';
+            highlightColor = '#a73a4b';
+            stemColor = '#33691e';
+        }
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(-21, -16, 42, 32);
+        ctx.fillRect(-16, -21, 32, 42);
+
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(-19, -14, 38, 28);
+        ctx.fillRect(-14, -19, 28, 38);
+
+        if (type === 'rotten') {
+            ctx.fillStyle = '#2d0812';
+            ctx.fillRect(-18, -12, 11, 24); 
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(-18, -8, 7, 16);
+        }
+
+        ctx.fillStyle = highlightColor;
+        ctx.fillRect(4, -12, 8, 8);
+
+        ctx.fillStyle = stemColor;
+        ctx.fillRect(15, -6, 6, 11);
+        ctx.fillRect(20, -3, 5, 5);
+
+        ctx.restore();
+    }
+
+    function checkComboAndFever() {
+        if (!isFever && feverCooldown <= 0) {
+            comboCount++;
+            if (comboCount >= 10) { 
+                isFever = true;
+                feverTimer = MAX_FEVER_TIME;
+                comboCount = 0;
+                screenShake = 22;
+                transport.active = false;
+                playSound('fever');
+                floatingTexts.push(new FloatingText("🔥 BREAK THE RULES!! 🔥", '#ffea00', 20));
+
+                for (let i = 0; i < 17; i++) bottomEmitters.push(new BottomTomatoEmitter(true));
+                for (let i = 0; i < 17; i++) bottomEmitters.push(new BottomTomatoEmitter(false));
+
+                const pColors = ['#ffea00', '#00e676', '#ff1744', '#00b0ff', '#ff4081', '#ffffff'];
+                for (let i = 0; i < 25; i++) {
+                    particles.push(new Particle(40, GAME_HEIGHT - 10, pColors[Math.floor(Math.random() * pColors.length)], Math.random() * 6 + 2, -Math.random() * 16 - 8));
+                    particles.push(new Particle(GAME_WIDTH - 40, GAME_HEIGHT - 10, pColors[Math.floor(Math.random() * pColors.length)], -(Math.random() * 6 + 2), -Math.random() * 16 - 8));
+                }
+            }
+        }
+    }
+
+    // 💡 倒數處理
+    function handleCountdown(delta) {
+        if (!isCountingDown) return;
+
+        countdownTimer += delta;
+
+        const steps = [
+            { text: '3', color: '#ffffff', sound: 'beep' },
+            { text: '2', color: '#ffea00', sound: 'beep' },
+            { text: '1', color: '#ff9800', sound: 'beep' },
+            { text: 'START!', color: '#ff1744', sound: 'beep_final' }
+        ];
+
+        const stepInterval = 0.85;
+        const currentIdx = Math.floor(countdownTimer / stepInterval);
+
+        if (currentIdx !== countdownStep && currentIdx < steps.length) {
+            countdownStep = currentIdx;
+            playSound(steps[countdownStep].sound);
+        }
+
+        if (currentIdx >= steps.length) {
+            isCountingDown = false;
+            gameStarted = true;
+            spawnNextTomato();
+            return;
+        }
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+        ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+        ctx.lineWidth = 2;
+        const lineSpacing = 10;
+
+        for (let x = -GAME_HEIGHT; x < GAME_WIDTH + GAME_HEIGHT; x += lineSpacing) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x + GAME_HEIGHT, GAME_HEIGHT);
+            ctx.stroke();
+        }
+
+        for (let x = GAME_WIDTH + GAME_HEIGHT; x > -GAME_HEIGHT; x -= lineSpacing * 1.5) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x - GAME_HEIGHT, GAME_HEIGHT);
+            ctx.stroke();
+        }
+
+        const step = steps[countdownStep] || steps[0];
+        const progressInStep = (countdownTimer % stepInterval) / stepInterval;
+        const scale = 1.0 + Math.sin(progressInStep * Math.PI) * 0.35; 
+
+        ctx.translate(GAME_WIDTH / 2, GAME_HEIGHT / 2);
+        ctx.scale(scale, scale);
+        drawPixelText(step.text, 0, 0, step.color, 76, 'center');
+        ctx.restore();
+    }
+
+    function updateGame(delta) {
+        if (!gameStarted || gameOver || isPaused || isCountingDown) return;
+
+        glowTimer += delta * 5.0;
+
+        if (screenShake > 0) {
+            shakeOffsetX = (Math.random() - 0.5) * screenShake * 2;
+            shakeOffsetY = (Math.random() - 0.5) * screenShake * 2;
+            screenShake *= 0.82;
+            if (screenShake < 0.5) {
+                screenShake = 0;
+                shakeOffsetX = 0;
+                shakeOffsetY = 0;
+            }
+        } else {
+            shakeOffsetX = 0;
+            shakeOffsetY = 0;
+        }
+
+        const frameSpeed = isFever ? 0.03 : transport.speed;
+
+        if (isFever) {
+            feverTimer -= delta;
+            if (feverTimer <= 0) {
+                isFever = false;
+                feverTimer = 0;
+                comboCount = 0;
+                feverCooldown = 1.5;
+                transport.active = false;
+                baseSpeedInterval /= 1.07;
+            }
+        } else if (feverCooldown > 0) {
+            feverCooldown -= delta;
+            if (feverCooldown <= 0) {
+                feverCooldown = 0;
+                spawnNextTomato();
+            }
+        }
+
+        if (transport.active) {
+            animTimer += delta;
+            if (animTimer >= frameSpeed) {
+                animTimer = 0;
+                transport.step++;
+                currentFrameIndex = Math.min(transport.step, 6);
+
+                if (transport.step >= 6) {
+                    transport.active = false;
+                    evaluateDelivery();
+                }
+            }
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+            particles[i].update();
+            if (particles[i].life <= 0) particles.splice(i, 1);
+        }
+
+        for (let i = bottomEmitters.length - 1; i >= 0; i--) {
+            bottomEmitters[i].update();
+            if (bottomEmitters[i].life <= 0) bottomEmitters.splice(i, 1);
+        }
+
+        for (let i = floatingTexts.length - 1; i >= 0; i--) {
+            floatingTexts[i].update();
+            if (floatingTexts[i].opacity <= 0) floatingTexts.splice(i, 1);
+        }
+
+        updateFilmGrain();
+    }
+
+    function evaluateDelivery() {
+        const currentType = pipeTypes[leftPipeType];
+
+        if (isFever || transport.type === currentType) {
+            playSound('success');
+
+            checkComboAndFever();
+
+            if (isFever) {
+                score += 300;
+                screenShake = 12;
+                floatingTexts.push(new FloatingText("+300", '#ffea00', 24));
+                for (let i = 0; i < 2; i++) {
+                    bottomEmitters.push(new BottomTomatoEmitter(true));
+                    bottomEmitters.push(new BottomTomatoEmitter(false));
+                }
+
+                const pColors = ['#ffea00', '#00e676', '#ff1744', '#00b0ff', '#ff4081', '#ffffff'];
+                for (let i = 0; i < 8; i++) {
+                    particles.push(new Particle(40, GAME_HEIGHT - 10, pColors[Math.floor(Math.random() * pColors.length)], Math.random() * 6 + 2, -Math.random() * 15 - 7));
+                    particles.push(new Particle(GAME_WIDTH - 40, GAME_HEIGHT - 10, pColors[Math.floor(Math.random() * pColors.length)], -(Math.random() * 6 + 2), -Math.random() * 15 - 7));
+                }
+            } else if (transport.type === 'normal') {
+                score += 100;
+                floatingTexts.push(new FloatingText("+100", '#00e676'));
+            } else if (transport.type === 'golden') {
+                score += 300;
+                if (hp < maxHp) {
+                    hp++;
+                    floatingTexts.push(new FloatingText("+300 +❤️", '#ffd600'));
+                } else {
+                    floatingTexts.push(new FloatingText("+300", '#ffd600'));
+                }
+            } else if (transport.type === 'rotten') {
+                score += 50;
+                floatingTexts.push(new FloatingText("+50", '#76ff03'));
+            }
+        } else {
+            playSound('fail');
+            hp--;
+            comboCount = 0;
+            floatingTexts.push(new FloatingText("-❤️", '#ff1744'));
+
+            if (hp <= 0) {
+                hp = 0;
+                gameOver = true;
+                gameOverLockTime = 0.5; // 短暫緩衝避免誤觸
+                return;
+            }
+        }
+
+        if (!isFever) {
+            setTimeout(spawnNextTomato, 350);
+        }
+    }
+
+    function drawUI() {
+
+        ctx.save();
+        if (screenShake > 0) {
+            ctx.translate(shakeOffsetX, shakeOffsetY);
+        }
+
+        if (transport.active) {
+            let startX = TUBE_CONFIG.rightX + TUBE_CONFIG.rightWidth / 2;
+            let endX = TUBE_CONFIG.leftX + TUBE_CONFIG.leftWidth / 2;
+            let startY = 265;
+            let bottomY = startY + 190; 
+
+            let curX, curY;
+            let ratio = currentFrameIndex / 6.0;
+
+            if (ratio <= 0.25) {
+                let subRatio = ratio / 0.25;
+                curX = startX;
+                curY = startY + (bottomY - startY) * subRatio;
+            } else if (ratio <= 0.75) {
+                let subRatio = (ratio - 0.25) / 0.50;
+                curX = startX + (endX - startX) * subRatio;
+                curY = bottomY;
+            } else {
+                let subRatio = (ratio - 0.75) / 0.25;
+                curX = endX;
+                curY = bottomY - (bottomY - startY) * subRatio;
+            }
+
+            drawClassicTomato(curX, curY, transport.type, 2.31);
+        }
+
+        drawTubeImageFitted(
+            tube4Image,
+            TUBE_CONFIG.rightX,
+            TUBE_CONFIG.rightY,
+            TUBE_CONFIG.rightWidth,
+            TUBE_CONFIG.rightHeight
+        );
+
+        let currentTubeImg = isFever ? tubeImages[0] : tubeImages[leftPipeType];
+        drawTubeImageFitted(
+            currentTubeImg,
+            TUBE_CONFIG.leftX,
+            TUBE_CONFIG.leftY,
+            TUBE_CONFIG.leftWidth,
+            TUBE_CONFIG.leftHeight
+        );
+
+        for (let btn of buttons) {
+            let isSelected = (leftPipeType === btn.id);
+            let bgColor = isSelected ? btn.bg : '#111111';
+            let borderColor = isSelected ? btn.color : '#555555';
+
+            drawPixelBox(btn.x, btn.y, btn.w, btn.h, bgColor, borderColor, '#000000', isSelected ? 4 : 3);
+
+            let btnCenterX = btn.x + btn.w / 2;
+            let btnCenterY = btn.y + btn.h / 2;
+            drawClassicTomato(btnCenterX, btnCenterY, btn.type, 1.15);
+        }
+
+        drawPixelBox(20, 20, 240, 50, '#111111', '#ffffff', '#000000', 4);
+        drawPixelText(`SCORE:${score}`, 140, 47, '#ffffff', 14, 'center');
+
+        let heartsStr = '';
+        for (let i = 0; i < maxHp; i++) {
+            heartsStr += (i < hp) ? '❤️' : '🖤';
+        }
+        const hpColor = hp <= 1 ? '#ff1744' : '#ffeb3b';
+        drawPixelBox(GAME_WIDTH - 260, 20, 240, 50, '#111111', hpColor, '#000000', 4);
+        drawPixelText(`HP:${heartsStr}`, GAME_WIDTH - 140, 47, hpColor, 14, 'center');
+
+        const fBarX = 280;
+        const fBarY = 32;
+        const fBarW = 240;
+        const fBarH = 22;
+        const radius = 11;
+
+        let fBorderColor = '#555555';
+        let fFillRatio = 0;
+
+        if (isFever) {
+            const flashTick = Math.floor(Date.now() / 60) % 3;
+            fBorderColor = flashTick === 0 ? '#ffea00' : (flashTick === 1 ? '#ff1744' : '#ffffff');
+            fFillRatio = Math.max(0, feverTimer / MAX_FEVER_TIME);
+        } else {
+            fBorderColor = comboCount > 0 ? '#ff1744' : '#555555';
+            fFillRatio = Math.min(1.0, comboCount / 10.0);
+        }
+
+        function drawRoundedBarPath(x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.arc(x + r, y + r, r, Math.PI * 0.5, Math.PI * 1.5);
+            ctx.lineTo(x + w - r, y);
+            ctx.arc(x + w - r, y + r, r, Math.PI * 1.5, Math.PI * 0.5);
+            ctx.lineTo(x + r, y + h);
+            ctx.closePath();
+        }
+
+        ctx.save();
+        ctx.fillStyle = '#000000';
+        drawRoundedBarPath(fBarX + 3, fBarY + 3, fBarW, fBarH, radius);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
+        drawRoundedBarPath(fBarX, fBarY, fBarW, fBarH, radius);
+        ctx.fill();
+
+        ctx.strokeStyle = fBorderColor;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        if (fFillRatio > 0) {
+            ctx.save();
+            drawRoundedBarPath(fBarX, fBarY, fBarW, fBarH, radius);
+            ctx.clip();
+
+            const fillW = fBarW * fFillRatio;
+            const cycle = (Date.now() % 3000) / 3000;
+            const shift = (Math.sin(cycle * Math.PI * 2) + 1) / 2;
+
+            const grad = ctx.createLinearGradient(fBarX, fBarY, fBarX + fBarW, fBarY);
+            if (shift < 0.5) {
+                grad.addColorStop(0, '#ff1744');
+                grad.addColorStop(0.5 + shift, '#ffea00');
+                grad.addColorStop(1, '#ff1744');
+            } else {
+                grad.addColorStop(0, '#ffea00');
+                grad.addColorStop(shift - 0.5, '#ff1744');
+                grad.addColorStop(1, '#ffea00');
+            }
+
+            ctx.fillStyle = grad;
+            ctx.fillRect(fBarX, fBarY, fillW, fBarH);
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.fillRect(fBarX, fBarY, fillW, 3);
+            ctx.restore();
+        }
+
+        // 💡 調整：進度條中央番茄縮小為 50px (與 candy_game/gao_game 一致)
+        drawClassicTomato(fBarX + fBarW / 2, fBarY + fBarH / 2, 'normal', 50);
+        ctx.restore();
+
+        // 💡 調整：Fever Mode 時顯示發光標題「🔥BREAK THE RULES!!🔥」
+        if (isFever) {
+            drawPixelText("🔥BREAK THE RULES!!🔥", GAME_WIDTH / 2, fBarY - 14, '#ffea00', 12, 'center');
+        }
+
+        for (let b of bottomEmitters) b.draw();
+        for (let p of particles) p.draw();
+        for (let ft of floatingTexts) ft.draw();
+
+        ctx.restore();
+
+        // 🎮 遊戲結束結算畫面 (完全對齊 gao_game / candy_game)
+        if (gameOver) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.90)';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+            drawPixelBox(100, 70, 600, 460, '#111111', '#ff1744', '#000000', 6);
+            drawPixelText('GAME OVER', GAME_WIDTH / 2, 130, '#ff1744', 28, 'center');
+            drawPixelText(`FINAL SCORE: ${score}`, GAME_WIDTH / 2, 190, '#ffeb3b', 16, 'center');
+
+            if (gameOverLockTime > 0) {
+                drawPixelText(`PLEASE WAIT...`, GAME_WIDTH / 2, 280, '#888888', 14, 'center');
+            } else {
+                // 1. CONTINUE? 按鈕
+                drawPixelBox(180, 260, 440, 50, '#d50000', '#ffea00', '#000000', 4);
+                drawPixelText('CONTINUE?', GAME_WIDTH / 2, 285, '#ffffff', 14, 'center');
+
+                // 2. GONNA STOP? 按鈕
+                drawPixelBox(180, 330, 440, 50, '#333333', '#ffffff', '#000000', 4);
+                drawPixelText('GONNA STOP?', GAME_WIDTH / 2, 355, '#ff4081', 14, 'center');
+
+                // 3. 按此觀看COLLAR《管理還管你》MV 按鈕
+                const mvBtnX = 155;
+                const mvBtnY = 430;
+                const mvBtnW = 490;
+                const mvBtnH = 70;
+                drawPixelBox(mvBtnX, mvBtnY, mvBtnW, mvBtnH, '#ffffff', '#C1001B', '#000000', 4);
+                
+                drawPixelTomatoIcon(mvBtnX + 28, mvBtnY + mvBtnH / 2, 1.0);
+                drawPixelText('按此觀看COLLAR《管理還管你》MV', GAME_WIDTH / 2, mvBtnY + mvBtnH / 2, '#ffffff', 21, 'center', true);
+                drawPixelTomatoIcon(mvBtnX + mvBtnW - 28, mvBtnY + mvBtnH / 2, 1.0);
+            }
+        }
+    }
+
+    function resetGame() {
+        score = 0;
+        hp = 3;
+        totalTomatoesSpawned = 0;
+        gameOver = false;
+        gameOverLockTime = 0;
+        leftPipeType = 0;
+        currentFrameIndex = 0;
+        comboCount = 0;
+        isFever = false;
+        feverTimer = 0;
+        feverCooldown = 0;
+        baseSpeedInterval = 0.15;
+        screenShake = 0;
+        shakeOffsetX = 0;
+        shakeOffsetY = 0;
+        particles = [];
+        bottomEmitters = [];
+        floatingTexts = [];
+
+        // 💡 重新倒數
+        gameStarted = false;
+        isCountingDown = true;
+        countdownStep = -1;
+        countdownTimer = 0;
+    }
+
+    function renderFrame() {
+        try {
+            const now = Date.now();
+            const delta = Math.min((now - lastTime) / 1000, 0.1);
+            lastTime = now;
+
+            ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+            let currentBg = winkaBgs[currentFrameIndex];
+            drawSmoothImage(currentBg);
+
+            if (gameStarted && !gameOver && !isCountingDown) {
+                updateGame(delta);
+            } else if (gameOver) {
+                if (gameOverLockTime > 0) {
+                    gameOverLockTime = Math.max(0, gameOverLockTime - delta);
+                }
+            }
+
+            drawUI();
+
+            if (isCountingDown) {
+                handleCountdown(delta);
+            }
+
+            drawFilmGrainOverlay();
+
+        } catch(err) {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+            drawPixelText('ERROR DETECTED', GAME_WIDTH/2, 280, '#ff1744', 18, 'center');
+            drawPixelText(String(err.message || err), GAME_WIDTH/2, 320, '#ffffff', 12, 'center');
+        }
+    }
+
+    setInterval(renderFrame, 1000 / 60);
+
+    function handleTap(clientX, clientY) {
+        initAudioContext();
+
+        if (isCountingDown) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = GAME_WIDTH / rect.width;
+        const scaleY = GAME_HEIGHT / rect.height;
+
+        const clickX = (clientX - rect.left) * scaleX;
+        const clickY = (clientY - rect.top) * scaleY;
+
+        // 💡 結算點擊邏輯 (升級 GONNA STOP? 多重備援機制)
+        if (gameOver && gameOverLockTime <= 0) {
+            // 1. CONTINUE? 按鈕 (X: 180~620, Y: 260~310)
+            if (clickX >= 180 && clickX <= 620 && clickY >= 260 && clickY <= 310) {
+                resetGame();
+                return;
+            }
+            // 2. GONNA STOP? 按鈕 (X: 180~620, Y: 330~380)
+            if (clickX >= 180 && clickX <= 620 && clickY >= 330 && clickY <= 380) {
+                try {
+                    // 💡 第一優先：最外層視窗 F5 刷新
+                    if (window.top && window.top !== window) {
+                        window.top.location.reload();
+                    } else {
+                        window.location.reload();
+                    }
+                } catch (err) {
+                    // 💡 第二備援：發送 postMessage 給父頁面
+                    if (window.parent) {
+                        window.parent.postMessage({ action: 'RELOAD_GAME' }, '*');
+                    } else {
+                        window.location.reload();
+                    }
+                }
+                return;
+            }
+            // 3. COLLAR MV 按鈕 (X: 155~645, Y: 430~500)
+            if (clickX >= 155 && clickX <= 645 && clickY >= 430 && clickY <= 500) {
+                window.open('https://youtu.be/4DObQP77xAs?si=lQ__OsG39YGlsKWd', '_blank');
+                return;
+            }
+            return;
+        }
+
+        if (isFever) {
+            playSound('switch');
+
+            if (transport.active) {
+                transport.active = false;
+                evaluateDelivery();
+            }
+
+            for (let i = 0; i < 2; i++) {
+                bottomEmitters.push(new BottomTomatoEmitter(true));
+                bottomEmitters.push(new BottomTomatoEmitter(false));
+            }
+
+            const pColors = ['#ffea00', '#00e676', '#ff1744', '#00b0ff', '#ff4081', '#ffffff'];
+            for (let i = 0; i < 8; i++) {
+                particles.push(new Particle(40, GAME_HEIGHT - 10, pColors[Math.floor(Math.random() * pColors.length)], Math.random() * 6 + 2, -Math.random() * 16 - 8));
+                particles.push(new Particle(GAME_WIDTH - 40, GAME_HEIGHT - 10, pColors[Math.floor(Math.random() * pColors.length)], -(Math.random() * 6 + 2), -Math.random() * 16 - 8));
+            }
+            
+            spawnNextTomato();
+            return;
+        }
+
+        for (let hb of buttonHitboxes) {
+            if (clickX >= hb.x && clickX <= hb.x + hb.w &&
+                clickY >= hb.y && clickY <= hb.y + hb.h) {
+                if (leftPipeType !== hb.id) {
+                    leftPipeType = hb.id;
+                    playSound('switch');
+                }
+                break;
+            }
+        }
+    }
+
+    container.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        handleTap(e.clientX, e.clientY);
+    });
+
+})();
+</script>
+
+</body>
+</html>
